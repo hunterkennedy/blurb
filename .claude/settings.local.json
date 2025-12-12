@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./venv/Scripts/pip:*)",
+      "Bash(timeout:*)",
+      "Bash(./venv/Scripts/python:*)",
+      "Bash(cat:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
