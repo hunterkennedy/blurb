@@ -1,23 +1,30 @@
 # Blurb
 
-FastAPI transcription service using Faster-Whisper. Runs natively on the host machine (not in Docker) to access the GPU.
+GPU-accelerated audio transcription service built on [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper). Exposes a simple REST API that accepts audio files, transcribes them on-GPU, and returns timestamped text with word-level timing. Jobs run one at a time (single GPU) and results are delivered via webhook or polling.
 
-**Requirements:** NVIDIA GPU, Linux, Python 3.12
+Comes with a small desktop manager GUI (Tkinter + system tray) for starting/stopping the service and monitoring job status.
+
+**Requirements:** NVIDIA GPU with CUDA, Linux, Python 3.12, FFmpeg
 
 ---
 
-## Setup (first time)
+## Setup
 
-### 1. Install Python 3.12 and FFmpeg
+### 1. Install system dependencies
+
+Python 3.12 and FFmpeg are required. Install them with your package manager, e.g.:
 
 ```bash
+# Fedora
 sudo dnf install -y python3.12 python3.12-tkinter ffmpeg
+
+# Ubuntu/Debian
+sudo apt install -y python3.12 python3.12-tk ffmpeg
 ```
 
 ### 2. Create the virtual environment
 
 ```bash
-cd /path/to/blurb
 python3.12 -m venv venv-linux
 ```
 
@@ -44,70 +51,31 @@ venv-linux/bin/pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and set at minimum:
-```env
-ADMIN_BEARER_TOKEN=your-secure-token
-CONDUCTOR_URL=http://localhost:8000
-BLURB_API_KEY=shared-secret-with-conductor
-```
-
-### 6. Create an API key
-
-Start blurb once manually to create the conductor API key, then stop it:
-
-```bash
-venv-linux/bin/uvicorn main:app --host 0.0.0.0 --port 8001
-```
-
-```bash
-curl -X POST http://localhost:8001/api-keys \
-  -H "Authorization: Bearer your-secure-token" \
-  -F "name=conductor"
-# Save the returned api_key — set it as BLURB_API_KEY in .env on both sides
-```
+Edit `.env` and set `ADMIN_BEARER_TOKEN` to something secure. The other values have sensible defaults — see [Configuration](#configuration) for the full list.
 
 ---
 
 ## Running
 
-**Normal use — manager window:**
+**Manager GUI:**
 
 ```bash
 venv-linux/bin/python blurb_manager.py
 ```
 
-This opens a small control panel that starts blurb automatically, shows live status and job stats, and has a Start/Stop button. The manager auto-starts on login via `~/.config/autostart/blurb-manager.desktop`.
+Opens a small control panel that starts blurb automatically, shows live status and job info, and minimizes to the system tray on close.
 
-**Manual / headless:**
+**Headless:**
 
 ```bash
 venv-linux/bin/uvicorn main:app --host 0.0.0.0 --port 8001
-```
-
-**Logs:**
-
-Blurb logs to stdout. When run via the manager, output goes to the terminal you launched the manager from. For persistent logging, redirect:
-
-```bash
-venv-linux/bin/python blurb_manager.py >> blurb.log 2>&1 &
-```
-
----
-
-## Autostart on login
-
-The file `~/.config/autostart/blurb-manager.desktop` is already in place after setup. The manager (and blurb) will start automatically on next login.
-
-To disable autostart:
-```bash
-rm ~/.config/autostart/blurb-manager.desktop
 ```
 
 ---
 
 ## Authentication
 
-All job/health endpoints require an API key via `X-API-Key` header. API keys are stored in `api_keys.json` (SHA-256 hashed) and survive restarts.
+All job and health endpoints require an API key via the `X-API-Key` header. Keys are stored in `api_keys.json` as SHA-256 hashes and persist across restarts.
 
 **Create a key** (requires `ADMIN_BEARER_TOKEN`):
 ```bash
@@ -135,19 +103,19 @@ curl -X DELETE http://localhost:8001/api-keys/<prefix> -H "X-API-Key: blurb_xxx"
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/jobs` | API key | Submit a transcription job |
-| `GET` | `/jobs/{id}` | API key | Poll job status (for debugging) |
+| `GET` | `/jobs/{id}` | API key | Get job status |
 | `GET` | `/jobs/{id}/result` | API key | Fetch result and delete job |
 | `DELETE` | `/jobs/{id}` | API key | Cancel a job |
 
-`POST /jobs` accepts multipart form data: `job_id` (string) + `file` (audio).
+`POST /jobs` accepts multipart form data: `job_id` (string) + `file` (audio file). Audio is downsampled to 16kHz mono internally via FFmpeg before transcription.
 
-On completion or failure, blurb POSTs the result to `{CONDUCTOR_URL}/blurb/webhook/{job_id}` automatically — conductor does not need to poll.
+If `CONDUCTOR_URL` is configured, blurb automatically POSTs results to `{CONDUCTOR_URL}/blurb/webhook/{job_id}` on completion or failure.
 
 ### Other
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/status` | none | Active job ID and job count (used by manager UI) |
+| `GET` | `/status` | None | Active job ID and job count |
 | `GET` | `/health` | API key | GPU info, model config, job count |
 | `POST` | `/api-keys` | Bearer token | Create API key |
 | `GET` | `/api-keys` | API key | List keys |
@@ -157,14 +125,14 @@ On completion or failure, blurb POSTs the result to `{CONDUCTOR_URL}/blurb/webho
 
 ## Configuration
 
-All settings in `.env`:
+All settings via `.env`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ADMIN_BEARER_TOKEN` | `changeme` | Token for creating API keys |
 | `MAX_AUDIO_SIZE_MB` | `256` | Max upload size |
-| `WHISPER_MODEL` | `distil-large-v3` | Whisper model variant |
+| `WHISPER_MODEL` | `distil-large-v3` | Faster-Whisper model name |
 | `WHISPER_COMPUTE_TYPE` | `float16` | Compute precision |
-| `CONDUCTOR_URL` | `` | Base URL for conductor (leave empty to run standalone) |
-| `BLURB_API_KEY` | `` | Shared secret sent to conductor in `Authorization` header |
+| `CONDUCTOR_URL` | | Webhook target URL (leave empty to run standalone) |
+| `BLURB_API_KEY` | | Auth token sent with webhook requests |
 | `JOB_TIMEOUT_SECONDS` | `3600` | Max seconds before a job is marked failed |
