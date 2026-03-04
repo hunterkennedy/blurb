@@ -121,8 +121,6 @@ curl -X DELETE http://localhost:8001/api-keys/<prefix> -H "X-API-Key: blurb_xxx"
 
 `POST /jobs` accepts multipart form data: `job_id` (string) + `file` (audio file). Audio is downsampled to 16kHz mono internally via FFmpeg before transcription.
 
-If `CONDUCTOR_URL` is configured, blurb automatically POSTs results to `{CONDUCTOR_URL}/blurb/webhook/{job_id}` on completion or failure.
-
 ### Other
 
 | Method | Path | Auth | Description |
@@ -145,6 +143,4 @@ All settings via `.env`:
 | `MAX_AUDIO_SIZE_MB` | `256` | Max upload size |
 | `WHISPER_MODEL` | `distil-large-v3` | Faster-Whisper model name |
 | `WHISPER_COMPUTE_TYPE` | `float16` | Compute precision |
-| `CONDUCTOR_URL` | | Webhook target URL (leave empty to run standalone) |
-| `BLURB_API_KEY` | | Auth token sent with webhook requests |
 | `JOB_TIMEOUT_SECONDS` | `3600` | Max seconds before a job is marked failed |

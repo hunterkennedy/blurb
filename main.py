@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Dict, Optional
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, BackgroundTasks, Form, Header
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -23,8 +22,6 @@ load_dotenv()
 MAX_AUDIO_SIZE_MB = int(os.getenv("MAX_AUDIO_SIZE_MB", "256"))
 ADMIN_BEARER_TOKEN = os.getenv("ADMIN_BEARER_TOKEN", "changeme")
 API_KEYS_FILE = Path("api_keys.json")
-CONDUCTOR_URL = os.getenv("CONDUCTOR_URL", "")
-BLURB_API_KEY = os.getenv("BLURB_API_KEY", "")
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "3600"))
 
 # Logging setup
@@ -35,47 +32,6 @@ logger = logging.getLogger(__name__)
 jobs: Dict[str, dict] = {}  # job_id -> {status, result, error, created_at}
 api_keys: Dict[str, dict] = {}  # prefix -> {hash, name, created_at}
 active_job_id: Optional[str] = None
-
-
-# ============================================================================
-# CONDUCTOR INTEGRATION
-# ============================================================================
-
-async def call_conductor(path: str, payload: dict = None):
-    """Fire-and-forget POST to conductor. Logs warning if not configured or fails."""
-    if not CONDUCTOR_URL or not BLURB_API_KEY:
-        logger.warning(f"CONDUCTOR_URL or BLURB_API_KEY not set, skipping {path}")
-        return
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"{CONDUCTOR_URL}{path}",
-                json=payload,
-                headers={"Authorization": f"Bearer {BLURB_API_KEY}"}
-            )
-    except Exception as e:
-        logger.warning(f"Failed to call conductor {path}: {e}")
-
-
-
-async def post_webhook(job_id: str):
-    """POST job result to conductor webhook. Best-effort."""
-    if job_id not in jobs:
-        return
-    job = jobs[job_id]
-    if job["status"] == "completed":
-        payload = {
-            "job_id": job_id,
-            "status": "completed",
-            "result": job.get("result")
-        }
-    else:
-        payload = {
-            "job_id": job_id,
-            "status": "failed",
-            "error": job.get("error", "Unknown error")
-        }
-    await call_conductor(f"/blurb/webhook/{job_id}", payload)
 
 
 # ============================================================================
@@ -227,7 +183,6 @@ async def process_transcription(job_id: str):
         active_job_id = None
         if job_id in jobs:
             jobs[job_id].pop("audio_data", None)  # free memory
-        await post_webhook(job_id)
 
 
 # ============================================================================
@@ -292,10 +247,7 @@ async def submit_transcription_job(
     file: UploadFile = File(...),
     user: str = Depends(verify_api_key)
 ):
-    """
-    Submit transcription job - starts processing immediately
-    Conductor receives results via webhook to POST /blurb/webhook/{job_id}
-    """
+    """Submit transcription job - starts processing immediately"""
     global active_job_id
 
     # Concurrency guard: single GPU = one job at a time
