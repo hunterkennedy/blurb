@@ -10,6 +10,18 @@ Comes with a small desktop manager GUI (Tkinter + system tray) for starting/stop
 
 ## Setup
 
+### Quick install
+
+After installing the system dependencies (step 1 below), run:
+
+```bash
+./install.sh
+```
+
+This creates the venv, installs PyTorch with CUDA and all dependencies, and copies `.env.example` to `.env`. Then edit `.env` to set `ADMIN_BEARER_TOKEN`.
+
+### Manual steps
+
 ### 1. Install system dependencies
 
 Python 3.12 and FFmpeg are required. Install them with your package manager, e.g.:
