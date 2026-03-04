@@ -9,6 +9,7 @@ __pycache__/
 .Python
 env/
 venv/
+venv-*/
 ENV/
 env.bak/
 venv.bak/
@@ -18,6 +19,9 @@ venv.bak/
 .idea/
 *.swp
 *.swo
+
+# Claude Code
+.claude/
 
 # OS
 .DS_Store

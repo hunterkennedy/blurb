@@ -1,18 +1,17 @@
 import os
-import uuid
 import asyncio
 import logging
 import secrets
 import json
 import hashlib
-from datetime import datetime, timedelta
+import torch
+from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Dict, Optional
-from collections import deque
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, BackgroundTasks, Form, Header
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -22,34 +21,80 @@ load_dotenv()
 
 # Configuration from environment
 MAX_AUDIO_SIZE_MB = int(os.getenv("MAX_AUDIO_SIZE_MB", "256"))
-MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "32"))
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
+ADMIN_BEARER_TOKEN = os.getenv("ADMIN_BEARER_TOKEN", "changeme")
 API_KEYS_FILE = Path("api_keys.json")
+CONDUCTOR_URL = os.getenv("CONDUCTOR_URL", "")
+BLURB_API_KEY = os.getenv("BLURB_API_KEY", "")
+JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "3600"))
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # In-memory storage
-jobs: Dict[str, dict] = {}
-job_queue = deque()
-current_transcription: Optional[str] = None
-log_buffer = deque(maxlen=100)
-api_keys: Dict[str, dict] = {}  # prefix -> {hash, name, created_at, last_used}
-
-app = FastAPI(title="Blurb", version="0.1.0")
+jobs: Dict[str, dict] = {}  # job_id -> {status, result, error, created_at}
+api_keys: Dict[str, dict] = {}  # prefix -> {hash, name, created_at}
+active_job_id: Optional[str] = None
 
 
-# Custom logging handler to capture logs
-class BufferHandler(logging.Handler):
-    def emit(self, record):
-        log_buffer.append(self.format(record))
+# ============================================================================
+# CONDUCTOR INTEGRATION
+# ============================================================================
+
+async def call_conductor(path: str, payload: dict = None):
+    """Fire-and-forget POST to conductor. Logs warning if not configured or fails."""
+    if not CONDUCTOR_URL or not BLURB_API_KEY:
+        logger.warning(f"CONDUCTOR_URL or BLURB_API_KEY not set, skipping {path}")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{CONDUCTOR_URL}{path}",
+                json=payload,
+                headers={"Authorization": f"Bearer {BLURB_API_KEY}"}
+            )
+    except Exception as e:
+        logger.warning(f"Failed to call conductor {path}: {e}")
 
 
-buffer_handler = BufferHandler()
-buffer_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(buffer_handler)
+
+async def post_webhook(job_id: str):
+    """POST job result to conductor webhook. Best-effort."""
+    if job_id not in jobs:
+        return
+    job = jobs[job_id]
+    if job["status"] == "completed":
+        payload = {
+            "job_id": job_id,
+            "status": "completed",
+            "result": job.get("result")
+        }
+    else:
+        payload = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": job.get("error", "Unknown error")
+        }
+    await call_conductor(f"/blurb/webhook/{job_id}", payload)
+
+
+# ============================================================================
+# LIFESPAN
+# ============================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global api_keys
+    # startup
+    api_keys = load_api_keys()
+    logger.info(f"Loaded {len(api_keys)} API keys from {API_KEYS_FILE}")
+    logger.info("Blurb started")
+    logger.info(f"Admin bearer token: {ADMIN_BEARER_TOKEN}")
+    logger.info("Create API keys at POST /api-keys with Authorization: Bearer <token>")
+    yield
+
+
+app = FastAPI(title="Blurb", version="0.1.0", lifespan=lifespan)
 
 
 # ============================================================================
@@ -71,8 +116,6 @@ def load_api_keys() -> Dict[str, dict]:
             # Convert ISO datetime strings back to datetime objects
             for key_data in data.values():
                 key_data['created_at'] = datetime.fromisoformat(key_data['created_at'])
-                if key_data.get('last_used'):
-                    key_data['last_used'] = datetime.fromisoformat(key_data['last_used'])
             return data
     except Exception as e:
         logger.error(f"Failed to load API keys: {e}")
@@ -87,8 +130,7 @@ def save_api_keys():
             data[prefix] = {
                 'hash': key_data['hash'],
                 'name': key_data['name'],
-                'created_at': key_data['created_at'].isoformat(),
-                'last_used': key_data['last_used'].isoformat() if key_data.get('last_used') else None
+                'created_at': key_data['created_at'].isoformat()
             }
 
         with open(API_KEYS_FILE, 'w') as f:
@@ -103,9 +145,14 @@ def generate_api_key() -> tuple[str, str]:
     prefix = key[:15]
     return key, prefix
 
-def verify_admin_credentials(username: str, password: str) -> bool:
-    """Verify admin username and password"""
-    return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
+async def verify_admin_token(authorization: str = Header(...)) -> None:
+    """Verify admin bearer token"""
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Invalid authorization header")
+
+    token = authorization[7:]  # Remove "Bearer " prefix
+    if token != ADMIN_BEARER_TOKEN:
+        raise HTTPException(401, "Invalid bearer token")
 
 async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> str:
     """Verify API key and return user identifier"""
@@ -120,114 +167,67 @@ async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> str
     if hash_api_key(x_api_key) != key_data["hash"]:
         raise HTTPException(401, "Invalid API key")
 
-    # Update last used timestamp and save async (don't block the request)
-    key_data["last_used"] = datetime.utcnow()
-    asyncio.create_task(asyncio.to_thread(save_api_keys))
-
     return "api_user"
 
 
 # Models
-class TranscribeResponse(BaseModel):
+class JobSubmitResponse(BaseModel):
     job_id: str
-    queue_position: int  # 0 = processing now, 1+ = position in queue
+    status: str
+    created_at: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str  # "processing", "completed", "failed"
+    result: Optional[dict] = None
+    error: Optional[str] = None
+    created_at: str
 
 
 class HealthResponse(BaseModel):
     status: str
-    logs: list[str]
-    queue_info: dict
+    jobs_active: int
     config: dict
 
 
 # Background job processing
-async def send_webhook(webhook_url: str, payload: dict):
-    """Send webhook notification to client or save to disk if no webhook"""
-    if not webhook_url:
-        # Save to disk instead
-        import json
-        output_dir = "transcripts"
-        os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, f"{payload['job_id']}.json")
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-        logger.info(f"Transcript saved to {filepath}")
-        return
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(webhook_url, json=payload)
-            response.raise_for_status()
-            logger.info(f"Webhook sent successfully to {webhook_url}")
-    except Exception as e:
-        logger.error(f"Failed to send webhook to {webhook_url}: {str(e)}")
-
-
 async def process_transcription(job_id: str):
-    global current_transcription
+    """Process transcription job - updates job status in memory"""
+    global active_job_id
+    jobs[job_id]["status"] = "processing"
+    logger.info(f"Starting transcription for job {job_id}")
 
     try:
-        current_transcription = job_id
-        webhook_url = jobs[job_id]["webhook_url"]
-        audio_data = jobs[job_id]["audio_data"]
-
-        logger.info(f"Starting transcription for job {job_id}")
-
-        # Run transcription in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            run_transcription,
-            audio_data
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, run_transcription, jobs[job_id]["audio_data"]),
+            timeout=JOB_TIMEOUT_SECONDS
         )
 
-        transcription_text = result["text"]
-        logger.info(f"Completed transcription for job {job_id}")
-
-        # Send webhook with result
-        webhook_payload = {
-            "job_id": job_id,
-            "status": "completed",
-            "transcription": transcription_text,
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["result"] = {
+            "text": result["text"],
             "language": result.get("language"),
             "segments": result.get("segments", [])
         }
-        await send_webhook(webhook_url, webhook_payload)
+        logger.info(f"Completed transcription for job {job_id}")
+
+    except asyncio.TimeoutError:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = f"Job timed out after {JOB_TIMEOUT_SECONDS}s"
+        logger.error(f"Job {job_id} timed out after {JOB_TIMEOUT_SECONDS}s")
 
     except Exception as e:
-        logger.error(f"Error processing job {job_id}: {str(e)}")
-
-        # Send webhook for failure
-        webhook_payload = {
-            "job_id": job_id,
-            "status": "failed",
-            "error": str(e)
-        }
-        await send_webhook(jobs[job_id]["webhook_url"], webhook_payload)
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = str(e)
+        logger.error(f"Job {job_id} failed: {e}")
 
     finally:
-        # Delete job immediately after webhook sent
-        del jobs[job_id]
-        logger.info(f"Job {job_id} completed and cleaned up")
-
-        current_transcription = None
-        # Process next job in queue
-        if job_queue:
-            next_job_id = job_queue.popleft()
-            asyncio.create_task(process_transcription(next_job_id))
-
-
-@app.on_event("startup")
-async def startup_event():
-    global api_keys
-
-    # Load API keys from disk
-    api_keys = load_api_keys()
-    logger.info(f"Loaded {len(api_keys)} API keys from {API_KEYS_FILE}")
-
-    logger.info("Blurb started")
-    logger.info(f"Admin credentials - username: {ADMIN_USERNAME}, password: {ADMIN_PASSWORD}")
-    logger.info("Create API keys at POST /api-keys")
+        active_job_id = None
+        if job_id in jobs:
+            jobs[job_id].pop("audio_data", None)  # free memory
+        await post_webhook(job_id)
 
 
 # ============================================================================
@@ -237,20 +237,15 @@ async def startup_event():
 @app.post("/api-keys")
 async def create_api_key(
     name: str = Form(...),
-    username: str = Form(...),
-    password: str = Form(...)
+    admin: None = Depends(verify_admin_token)
 ):
-    """Create API key with admin credentials"""
-    if not verify_admin_credentials(username, password):
-        raise HTTPException(401, "Invalid admin credentials")
-
+    """Create API key with admin bearer token"""
     full_key, prefix = generate_api_key()
 
     api_keys[prefix] = {
         "hash": hash_api_key(full_key),
         "name": name,
-        "created_at": datetime.utcnow(),
-        "last_used": None
+        "created_at": datetime.utcnow()
     }
 
     # Persist to disk
@@ -269,8 +264,7 @@ async def list_api_keys(user: str = Depends(verify_api_key)):
     return [{
         "prefix": prefix,
         "name": data["name"],
-        "created_at": data["created_at"].isoformat(),
-        "last_used": data["last_used"].isoformat() if data["last_used"] else None
+        "created_at": data["created_at"].isoformat()
     } for prefix, data in api_keys.items()]
 
 @app.delete("/api-keys/{prefix}")
@@ -290,78 +284,124 @@ async def delete_api_key(prefix: str, user: str = Depends(verify_api_key)):
 # ============================================================================
 # TRANSCRIPTION ENDPOINTS
 # ============================================================================
-@app.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe_audio(
+
+@app.post("/jobs", response_model=JobSubmitResponse)
+async def submit_transcription_job(
     background_tasks: BackgroundTasks,
     job_id: str = Form(...),
     file: UploadFile = File(...),
-    webhook_url: str = Form(None),
     user: str = Depends(verify_api_key)
 ):
-    # Check if job_id already exists
-    if job_id in jobs or job_id == current_transcription:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Job ID {job_id} already exists"
-        )
+    """
+    Submit transcription job - starts processing immediately
+    Conductor receives results via webhook to POST /blurb/webhook/{job_id}
+    """
+    global active_job_id
 
-    # Check queue capacity
-    total_jobs = len(jobs) + (1 if current_transcription else 0)
-    if total_jobs >= MAX_QUEUE_SIZE + 1:  # +1 for current processing
-        raise HTTPException(
-            status_code=503,
-            detail=f"Queue is full. Max queue size is {MAX_QUEUE_SIZE}"
-        )
+    # Concurrency guard: single GPU = one job at a time
+    if active_job_id is not None:
+        raise HTTPException(503, f"Blurb is busy with job {active_job_id}")
+
+    # Check if job_id already exists
+    if job_id in jobs:
+        raise HTTPException(400, f"Job ID {job_id} already exists")
 
     # Check file size
     file_content = await file.read()
     file_size_mb = len(file_content) / (1024 * 1024)
 
     if file_size_mb > MAX_AUDIO_SIZE_MB:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Max size is {MAX_AUDIO_SIZE_MB}MB"
-        )
+        raise HTTPException(413, f"File too large. Max size is {MAX_AUDIO_SIZE_MB}MB")
 
+    # Create job entry
+    created_at = datetime.utcnow()
     jobs[job_id] = {
         "audio_data": file_content,
-        "filename": file.filename,
-        "webhook_url": webhook_url  # Can be None for testing
+        "status": "queued",
+        "result": None,
+        "error": None,
+        "created_at": created_at
     }
 
-    # Queue or start processing
-    if current_transcription is None and not job_queue:
-        # No job running, start immediately
-        background_tasks.add_task(process_transcription, job_id)
-        queue_position = 0  # Processing now
-    else:
-        # Add to queue
-        job_queue.append(job_id)
-        queue_position = len(job_queue)  # Position in queue (1-based)
+    # Set active_job_id synchronously before returning to prevent race conditions
+    active_job_id = job_id
+    background_tasks.add_task(process_transcription, job_id)
 
-    logger.info(f"Job {job_id} created for file {file.filename} (queue position: {queue_position})")
+    logger.info(f"Job {job_id} submitted ({file_size_mb:.1f}MB)")
 
-    return TranscribeResponse(
+    return JobSubmitResponse(
         job_id=job_id,
-        queue_position=queue_position
+        status="queued",
+        created_at=created_at.isoformat()
     )
+
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str, user: str = Depends(verify_api_key)):
+    """
+    Get job status - for manual testing and debugging
+    Returns job status and result if completed
+    """
+    if job_id not in jobs:
+        raise HTTPException(404, f"Job {job_id} not found")
+
+    job = jobs[job_id]
+    return JobStatusResponse(
+        job_id=job_id,
+        status=job["status"],
+        result=job.get("result"),
+        error=job.get("error"),
+        created_at=job["created_at"].isoformat()
+    )
+
+@app.get("/jobs/{job_id}/result")
+async def get_job_result(job_id: str, user: str = Depends(verify_api_key)):
+    """
+    Get job result and DELETE the job from memory (cleanup)
+    For manual testing and debugging
+    """
+    if job_id not in jobs:
+        raise HTTPException(404, f"Job {job_id} not found")
+
+    job = jobs[job_id]
+
+    if job["status"] == "processing" or job["status"] == "queued":
+        raise HTTPException(400, f"Job {job_id} is still {job['status']}")
+
+    if job["status"] == "failed":
+        error = job.get("error", "Unknown error")
+        # Clean up failed job
+        del jobs[job_id]
+        raise HTTPException(500, f"Job failed: {error}")
+
+    # Get result and clean up
+    result = job["result"]
+    del jobs[job_id]
+    logger.info(f"Job {job_id} result fetched and cleaned up")
+
+    return result
+
+@app.delete("/jobs/{job_id}")
+async def cancel_job(job_id: str, user: str = Depends(verify_api_key)):
+    """Cancel/delete a job"""
+    if job_id not in jobs:
+        raise HTTPException(404, f"Job {job_id} not found")
+
+    del jobs[job_id]
+    logger.info(f"Job {job_id} cancelled")
+    return {"message": f"Job {job_id} cancelled"}
+
+
+@app.get("/status")
+async def status():
+    """Unauthenticated status endpoint for the local manager UI"""
+    return {
+        "active_job_id": active_job_id,
+        "jobs_total": len(jobs)
+    }
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check(user: str = Depends(verify_api_key)):
-    import torch
-
-    # Queue information
-    queue_info = {
-        "jobs_processing": 1 if current_transcription else 0,
-        "jobs_queued": len(job_queue),
-        "total_active_jobs": len(jobs),
-        "queue_slots_available": MAX_QUEUE_SIZE - len(job_queue),
-        "max_queue_size": MAX_QUEUE_SIZE,
-        "current_job_id": current_transcription
-    }
-
-    # Configuration information
     config = {
         "whisper_model": os.getenv("WHISPER_MODEL", "base"),
         "device": "cuda" if torch.cuda.is_available() else "cpu",
@@ -372,7 +412,6 @@ async def health_check(user: str = Depends(verify_api_key)):
 
     return HealthResponse(
         status="healthy",
-        logs=list(log_buffer),
-        queue_info=queue_info,
+        jobs_active=len(jobs),
         config=config
     )

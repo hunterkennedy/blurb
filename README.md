@@ -1,291 +1,170 @@
 # Blurb
 
-Webhook-based FastAPI microservice for audio transcription with Faster-Whisper.
+FastAPI transcription service using Faster-Whisper. Runs natively on the host machine (not in Docker) to access the GPU.
 
-**Requirements:** NVIDIA GPU with CUDA support (this service will not run on CPU).
+**Requirements:** NVIDIA GPU, Linux, Python 3.12
 
-## Quick Start
+---
 
-### 1. Setup Virtual Environment (Recommended)
+## Setup (first time)
 
-```powershell
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# On Windows (PowerShell):
-.\venv\Scripts\Activate.ps1
-
-# On Windows (CMD):
-.\venv\Scripts\activate.bat
-
-# On Linux/Mac:
-source venv/bin/activate
-```
-
-### 2. Install CUDA Dependencies
-
-For **NVIDIA RTX 30-series** (3060, 3070, 3080, 3090) or newer:
+### 1. Install Python 3.12 and FFmpeg
 
 ```bash
-# Install PyTorch with CUDA 11.8 support
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+sudo dnf install -y python3.12 python3.12-tkinter ffmpeg
+```
 
-# Install cuBLAS and cuDNN for faster-whisper
-pip install nvidia-cublas-cu11 nvidia-cudnn-cu11
+### 2. Create the virtual environment
+
+```bash
+cd /path/to/blurb
+python3.12 -m venv venv-linux
+```
+
+### 3. Install PyTorch with CUDA
+
+```bash
+venv-linux/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 ```
 
 Verify CUDA is working:
 ```bash
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+venv-linux/bin/python -c "import torch; print('CUDA:', torch.cuda.is_available())"
 ```
 
-### 3. Install FFmpeg
-
-FFmpeg is required for audio preprocessing (downsampling to 16kHz mono):
-
-```powershell
-# Option 1: Using winget
-winget install FFmpeg
-
-# Option 2: Using chocolatey
-choco install ffmpeg
-
-# Option 3: Download from https://ffmpeg.org/download.html and add to PATH
-```
-
-Verify installation:
-```bash
-ffmpeg -version
-```
-
-### 4. Install Application
-
-1. Copy `.env.example` to `.env` and configure:
-   ```powershell
-   copy .env.example .env
-   ```
-
-2. Edit `.env` with your credentials:
-   ```env
-   ADMIN_USERNAME=admin
-   ADMIN_PASSWORD=your-secure-password
-   SECRET_KEY=generate-random-key-here
-   ```
-
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### 5. Run the Service
+### 4. Install dependencies
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
+venv-linux/bin/pip install -r requirements.txt
 ```
 
-API will be available at `http://localhost:8000`
+### 5. Configure
 
-**API docs:** `http://localhost:8000/docs`
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set at minimum:
+```env
+ADMIN_BEARER_TOKEN=your-secure-token
+CONDUCTOR_URL=http://localhost:8000
+BLURB_API_KEY=shared-secret-with-conductor
+```
+
+### 6. Create an API key
+
+Start blurb once manually to create the conductor API key, then stop it:
+
+```bash
+venv-linux/bin/uvicorn main:app --host 0.0.0.0 --port 8001
+```
+
+```bash
+curl -X POST http://localhost:8001/api-keys \
+  -H "Authorization: Bearer your-secure-token" \
+  -F "name=conductor"
+# Save the returned api_key — set it as BLURB_API_KEY in .env on both sides
+```
+
+---
+
+## Running
+
+**Normal use — manager window:**
+
+```bash
+venv-linux/bin/python blurb_manager.py
+```
+
+This opens a small control panel that starts blurb automatically, shows live status and job stats, and has a Start/Stop button. The manager auto-starts on login via `~/.config/autostart/blurb-manager.desktop`.
+
+**Manual / headless:**
+
+```bash
+venv-linux/bin/uvicorn main:app --host 0.0.0.0 --port 8001
+```
+
+**Logs:**
+
+Blurb logs to stdout. When run via the manager, output goes to the terminal you launched the manager from. For persistent logging, redirect:
+
+```bash
+venv-linux/bin/python blurb_manager.py >> blurb.log 2>&1 &
+```
+
+---
+
+## Autostart on login
+
+The file `~/.config/autostart/blurb-manager.desktop` is already in place after setup. The manager (and blurb) will start automatically on next login.
+
+To disable autostart:
+```bash
+rm ~/.config/autostart/blurb-manager.desktop
+```
+
+---
 
 ## Authentication
 
-All endpoints require an API key via the `X-API-Key` header.
+All job/health endpoints require an API key via `X-API-Key` header. API keys are stored in `api_keys.json` (SHA-256 hashed) and survive restarts.
 
-**Persistence:** API keys are stored in `api_keys.json` (SHA-256 hashed, not plain text). Keys survive server restarts.
-
-### Creating API Keys
-
-Create an API key using admin credentials (from `.env`):
-
+**Create a key** (requires `ADMIN_BEARER_TOKEN`):
 ```bash
-curl -X POST http://localhost:8000/api-keys \
-  -F "name=Production Server" \
-  -F "username=admin" \
-  -F "password=yourpassword"
-
-# Response:
-# {
-#   "api_key": "blurb_xxxxxxxxxxxxx",
-#   "prefix": "blurb_12345678",
-#   "name": "Production Server",
-#   "message": "Save this key securely - it won't be shown again"
-# }
+curl -X POST http://localhost:8001/api-keys \
+  -H "Authorization: Bearer <admin-token>" \
+  -F "name=my-key"
 ```
 
-### Using API Keys
-
-Include the API key in all requests:
-
+**List keys:**
 ```bash
-curl -X POST http://localhost:8000/transcribe \
-  -H "X-API-Key: blurb_xxxxxxxxxxxxx" \
-  -F "job_id=test123" \
-  -F "file=@audio.mp3"
+curl http://localhost:8001/api-keys -H "X-API-Key: blurb_xxx"
 ```
 
-### Managing API Keys
-
-List all API keys (requires existing API key):
+**Delete a key:**
 ```bash
-curl -X GET http://localhost:8000/api-keys \
-  -H "X-API-Key: blurb_xxxxxxxxxxxxx"
+curl -X DELETE http://localhost:8001/api-keys/<prefix> -H "X-API-Key: blurb_xxx"
 ```
 
-Delete an API key (requires existing API key):
-```bash
-curl -X DELETE http://localhost:8000/api-keys/blurb_12345678 \
-  -H "X-API-Key: blurb_xxxxxxxxxxxxx"
-```
-
-## Architecture
-
-**Webhook-based design**: Transcription results are delivered via webhooks when provided. For testing without a webhook, omit the `webhook_url` parameter and results will be saved to `transcripts/{job_id}.json`. Jobs are immediately deleted after webhook delivery or file save.
-
-**Audio preprocessing**: All audio is automatically downsampled to 16kHz mono before transcription (matches Groq's preprocessing pipeline).
-
-**Model**: Uses `distil-large-v3` (Whisper 3 Turbo equivalent) with `BatchedInferencePipeline` and batch size 8 for optimal GPU performance on RTX 30-series.
+---
 
 ## Endpoints
 
-### API Key Management
+### Jobs
 
-#### POST /api-keys
-Create a new API key using admin credentials
-- **Auth**: Admin username and password (no API key required)
-- **Body**:
-  - `name`: Descriptive name for the API key (e.g., "Production Server")
-  - `username`: Admin username from `.env`
-  - `password`: Admin password from `.env`
-- **Returns**: `{"api_key": "blurb_...", "prefix": "blurb_123...", "name": "...", "message": "..."}`
-- **Note**: The full API key is only shown once. Save it securely.
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/jobs` | API key | Submit a transcription job |
+| `GET` | `/jobs/{id}` | API key | Poll job status (for debugging) |
+| `GET` | `/jobs/{id}/result` | API key | Fetch result and delete job |
+| `DELETE` | `/jobs/{id}` | API key | Cancel a job |
 
-#### GET /api-keys
-List all API keys
-- **Auth**: API Key (header `X-API-Key`)
-- **Returns**: Array of API key metadata (without the actual keys)
+`POST /jobs` accepts multipart form data: `job_id` (string) + `file` (audio).
 
-#### DELETE /api-keys/{prefix}
-Delete/revoke an API key
-- **Auth**: API Key (header `X-API-Key`)
-- **Path**: `prefix` - The API key prefix (e.g., "blurb_12345678")
-- **Returns**: `{"message": "API key deleted"}`
+On completion or failure, blurb POSTs the result to `{CONDUCTOR_URL}/blurb/webhook/{job_id}` automatically — conductor does not need to poll.
 
-### Transcription
+### Other
 
-#### POST /transcribe
-Upload audio file for transcription with optional webhook callback
-- **Auth**: API Key (header `X-API-Key`)
-- **Body**:
-  - `job_id`: **REQUIRED** - Unique identifier for this transcription job (supplied by caller)
-  - `file`: Audio file (multipart/form-data)
-  - `webhook_url`: **OPTIONAL** - Your callback URL for results. If omitted, saves to `transcripts/{job_id}.json`
-- **Returns**: `{"job_id": "...", "queue_position": 0}`
-- **Webhook payload (success)**:
-  ```json
-  {
-    "job_id": "abc-123",
-    "status": "completed",
-    "transcription": "Full transcription text...",
-    "language": "en",
-    "segments": [...]
-  }
-  ```
-- **Webhook payload (failure)**:
-  ```json
-  {
-    "job_id": "abc-123",
-    "status": "failed",
-    "error": "error message"
-  }
-  ```
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/status` | none | Active job ID and job count (used by manager UI) |
+| `GET` | `/health` | API key | GPU info, model config, job count |
+| `POST` | `/api-keys` | Bearer token | Create API key |
+| `GET` | `/api-keys` | API key | List keys |
+| `DELETE` | `/api-keys/{prefix}` | API key | Delete key |
 
-#### GET /health
-Service health check with queue status, configuration, and recent logs
-- **Auth**: API Key (header `X-API-Key`)
-- **Returns**:
-  ```json
-  {
-    "status": "healthy",
-    "logs": ["..."],
-    "queue_info": {
-      "jobs_processing": 1,
-      "jobs_queued": 3,
-      "queue_slots_available": 29,
-      "max_queue_size": 32,
-      "current_job_id": "abc-123"
-    },
-    "config": {
-      "whisper_model": "base",
-      "device": "cuda",
-      "compute_type": "int8",
-      "cuda_available": true,
-      "max_audio_size_mb": 256
-    }
-  }
-  ```
+---
 
 ## Configuration
 
 All settings in `.env`:
 
-**Authentication:**
-- `ADMIN_USERNAME`: Admin username for creating API keys (default: admin)
-- `ADMIN_PASSWORD`: Admin password for creating API keys (default: changeme)
-
-**Service:**
-- `MAX_AUDIO_SIZE_MB`: Max upload size in MB (default: 256)
-- `MAX_QUEUE_SIZE`: Max queued jobs (default: 32)
-
-**Whisper:**
-- `WHISPER_MODEL`: Model size - tiny, base, small, medium, large-v2, large-v3, distil-large-v3 (default: distil-large-v3)
-- `WHISPER_COMPUTE_TYPE`: Computation type - int8, float16, float32 (default: float16)
-
-## Example Usage
-
-### Quick Start Workflow
-
-1. **Create an API key** (first time setup):
-```bash
-curl -X POST http://localhost:8000/api-keys \
-  -F "name=My Server" \
-  -F "username=admin" \
-  -F "password=changeme"
-
-# Save the returned api_key value
-```
-
-2. **Transcribe audio**:
-```bash
-curl -X POST http://localhost:8000/transcribe \
-  -H "X-API-Key: blurb_xxxxxxxxxxxxx" \
-  -F "job_id=unique-id-123" \
-  -F "file=@audio.mp3"
-```
-
-### Production (with webhook and API key)
-```bash
-curl -X POST http://localhost:8000/transcribe \
-  -H "X-API-Key: blurb_xxxxxxxxxxxxx" \
-  -F "job_id=my-unique-job-123" \
-  -F "file=@audio.mp3" \
-  -F "webhook_url=https://yourserver.com/webhook"
-```
-
-Your webhook endpoint will receive the transcription when complete.
-
-### Testing (without webhook - saves to disk)
-```bash
-curl -X POST http://localhost:8000/transcribe \
-  -H "X-API-Key: blurb_xxxxxxxxxxxxx" \
-  -F "job_id=test-job-456" \
-  -F "file=@audio.mp3"
-```
-
-Result will be saved to `transcripts/test-job-456.json`
-
-### Health Check
-```bash
-curl -X GET http://localhost:8000/health \
-  -H "X-API-Key: blurb_xxxxxxxxxxxxx"
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ADMIN_BEARER_TOKEN` | `changeme` | Token for creating API keys |
+| `MAX_AUDIO_SIZE_MB` | `256` | Max upload size |
+| `WHISPER_MODEL` | `distil-large-v3` | Whisper model variant |
+| `WHISPER_COMPUTE_TYPE` | `float16` | Compute precision |
+| `CONDUCTOR_URL` | `` | Base URL for conductor (leave empty to run standalone) |
+| `BLURB_API_KEY` | `` | Shared secret sent to conductor in `Authorization` header |
+| `JOB_TIMEOUT_SECONDS` | `3600` | Max seconds before a job is marked failed |

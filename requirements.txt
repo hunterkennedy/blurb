@@ -1,6 +1,5 @@
 # Install PyTorch with CUDA support FIRST using:
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-# pip install nvidia-cublas-cu11 nvidia-cudnn-cu11
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
@@ -8,3 +7,4 @@ python-dotenv==1.0.0
 python-multipart==0.0.6
 httpx==0.25.1
 faster-whisper
+PyQt6
