@@ -71,7 +71,7 @@ def transcribe_audio(audio_data: bytes, language: Optional[str] = None) -> dict:
         # Transcribe with batched inference (batch_size=8) and word timestamps
         segments, info = model.transcribe(
             tmp_output_path,
-            language=language,
+            language=language or "en",
             word_timestamps=True,
             batch_size=8,
             beam_size=5,
