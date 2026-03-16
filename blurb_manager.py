@@ -30,6 +30,7 @@ PAD = dict(padx=14, pady=6)
 FONT_LABEL = ("Sans", 10)
 FONT_STATUS = ("Sans", 11, "bold")
 COLOR_RUN = "#2ecc71"
+COLOR_WORK = "#f39c12"
 COLOR_STOP = "#e74c3c"
 COLOR_BG = "#1e1e2e"
 COLOR_FG = "#cdd6f4"
@@ -52,15 +53,17 @@ class _QtTrayThread(threading.Thread):
         self._on_toggle = on_toggle
         self._on_quit = on_quit
         self._alive = alive
+        self._working = False
         self._title = "Blurb"
         self._dirty = True
         self._lock = threading.Lock()
         self._qt_app: QApplication | None = None
 
-    def set_state(self, alive: bool, title: str):
+    def set_state(self, alive: bool, working: bool, title: str):
         with self._lock:
-            if self._alive != alive or self._title != title:
+            if self._alive != alive or self._working != working or self._title != title:
                 self._alive = alive
+                self._working = working
                 self._title = title
                 self._dirty = True
 
@@ -106,9 +109,15 @@ class _QtTrayThread(threading.Thread):
     def _refresh(self):
         with self._lock:
             alive = self._alive
+            working = self._working
             title = self._title
 
-        color = QColor(COLOR_RUN if alive else COLOR_STOP)
+        if not alive:
+            color = QColor(COLOR_STOP)
+        elif working:
+            color = QColor(COLOR_WORK)
+        else:
+            color = QColor(COLOR_RUN)
         pixmap = QPixmap(64, 64)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
@@ -306,10 +315,12 @@ class BlurbManager:
             return
         if alive:
             job = (stats or {}).get("active_job_id")
-            title = "Blurb - transcribing" if job else "Blurb - idle"
+            working = bool(job)
+            title = "Blurb - transcribing" if working else "Blurb - idle"
         else:
+            working = False
             title = "Blurb - stopped"
-        self._tray_thread.set_state(alive, title)
+        self._tray_thread.set_state(alive, working, title)
 
     def _update_ui(self, alive: bool, stats: dict | None):
         if alive:
