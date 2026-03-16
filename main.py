@@ -6,7 +6,7 @@ import json
 import hashlib
 import torch
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 from pathlib import Path
 
@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Backgroun
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from transcribe import transcribe_audio as run_transcription
+from transcribe import transcribe_audio as run_transcription, get_model
 
 load_dotenv()
 
@@ -23,6 +23,7 @@ MAX_AUDIO_SIZE_MB = int(os.getenv("MAX_AUDIO_SIZE_MB", "256"))
 ADMIN_BEARER_TOKEN = os.getenv("ADMIN_BEARER_TOKEN", "changeme")
 API_KEYS_FILE = Path("api_keys.json")
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "3600"))
+JOB_TTL_SECONDS = 300  # 5 minutes
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +39,21 @@ active_job_id: Optional[str] = None
 # LIFESPAN
 # ============================================================================
 
+async def cleanup_expired_jobs():
+    """Periodically remove completed/failed jobs older than JOB_TTL_SECONDS."""
+    while True:
+        await asyncio.sleep(60)
+        cutoff = datetime.utcnow() - timedelta(seconds=JOB_TTL_SECONDS)
+        expired = [
+            job_id for job_id, job in jobs.items()
+            if job["status"] in ("completed", "failed") and job["created_at"] < cutoff
+        ]
+        for job_id in expired:
+            del jobs[job_id]
+        if expired:
+            logger.info(f"Cleaned up {len(expired)} expired job(s)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global api_keys
@@ -47,7 +63,12 @@ async def lifespan(app: FastAPI):
     logger.info("Blurb started")
     logger.info(f"Admin bearer token: {ADMIN_BEARER_TOKEN}")
     logger.info("Create API keys at POST /api-keys with Authorization: Bearer <token>")
+    # Pre-warm model so it's in VRAM before the first request arrives
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, get_model)
+    cleanup_task = asyncio.create_task(cleanup_expired_jobs())
     yield
+    cleanup_task.cancel()
 
 
 app = FastAPI(title="Blurb", version="0.1.0", lifespan=lifespan)
