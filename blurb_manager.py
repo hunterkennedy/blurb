@@ -4,6 +4,9 @@ Blurb Manager — small control panel for the blurb transcription service.
 On launch, attaches to an existing blurb process if one is running, otherwise
 starts a new one. Only one blurb process is allowed at a time.
 Auto-started on login via ~/.config/autostart/blurb-manager.desktop.
+
+If WEB_URL is set in .env, also manages the pull-worker
+(web_worker.py) as a second background process.
 """
 
 import http.client
@@ -38,6 +41,20 @@ COLOR_CARD = "#313244"
 COLOR_BTN_START = "#a6e3a1"
 COLOR_BTN_STOP = "#f38ba8"
 COLOR_BTN_FG = "#1e1e2e"
+COLOR_MUTED = "#6c7086"
+
+
+def _read_env_var(key: str) -> str:
+    """Read a single variable from .env without importing dotenv."""
+    env_path = BLURB_DIR / ".env"
+    if not env_path.exists():
+        return ""
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(f"{key}=") and not line.startswith("#"):
+                return line.split("=", 1)[1].strip()
+    return ""
 
 
 # ============================================================================
@@ -155,9 +172,11 @@ class BlurbManager:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.pid: int | None = None
+        self.worker_pid: int | None = None
         self._conn: http.client.HTTPConnection | None = None
         self._tray_thread: _QtTrayThread | None = None
         self._last_alive = False
+        self._conductor_url = _read_env_var("WEB_URL")
         self._setup_window()
         self._build_ui()
         self._attach_or_start()
@@ -167,7 +186,8 @@ class BlurbManager:
 
     def _setup_window(self):
         self.root.title("Blurb")
-        self.root.geometry("300x190")
+        height = 275 if self._conductor_url else 190
+        self.root.geometry(f"300x{height}")
         self.root.resizable(False, False)
         self.root.configure(bg=COLOR_BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -203,13 +223,56 @@ class BlurbManager:
                                   fg=COLOR_FG, bg=COLOR_CARD)
         self.queue_lbl.pack(fill=tk.X, padx=10, pady=(2, 6))
 
-        # --- button ---
+        # --- blurb button ---
         self.btn = tk.Button(self.root, text="Stop", width=12,
                              font=("Sans", 10, "bold"),
                              fg=COLOR_BTN_FG, bg=COLOR_BTN_STOP,
                              relief=tk.FLAT, cursor="hand2",
                              command=self._toggle)
         self.btn.pack(pady=(0, 10))
+
+        # --- pull-worker section (only shown if WEB_URL is set) ---
+        if self._conductor_url:
+            self._build_conductor_ui()
+
+    def _build_conductor_ui(self):
+        sep = tk.Frame(self.root, bg=COLOR_MUTED, height=1)
+        sep.pack(fill=tk.X, padx=14, pady=(0, 8))
+
+        # Header row with dot
+        con_top = tk.Frame(self.root, bg=COLOR_BG)
+        con_top.pack(fill=tk.X, padx=14, pady=(0, 4))
+
+        self.worker_dot = tk.Label(con_top, text="●", font=("Sans", 12),
+                                   fg=COLOR_STOP, bg=COLOR_BG)
+        self.worker_dot.pack(side=tk.LEFT)
+
+        # Truncate long URLs for display
+        display_url = self._conductor_url
+        if len(display_url) > 28:
+            display_url = display_url[:25] + "…"
+
+        tk.Label(con_top, text=f"  Worker  ", font=FONT_STATUS,
+                 fg=COLOR_FG, bg=COLOR_BG).pack(side=tk.LEFT)
+        tk.Label(con_top, text=display_url, font=("Sans", 9),
+                 fg=COLOR_MUTED, bg=COLOR_BG).pack(side=tk.LEFT)
+
+        # Worker stats card
+        wcard = tk.Frame(self.root, bg=COLOR_CARD, bd=0)
+        wcard.pack(fill=tk.X, padx=14, pady=(0, 8))
+
+        self.worker_lbl = tk.Label(wcard, text="Worker:           starting…",
+                                   anchor="w", font=FONT_LABEL,
+                                   fg=COLOR_FG, bg=COLOR_CARD)
+        self.worker_lbl.pack(fill=tk.X, padx=10, pady=(6, 6))
+
+        # Worker button
+        self.worker_btn = tk.Button(self.root, text="Stop Worker", width=12,
+                                    font=("Sans", 10, "bold"),
+                                    fg=COLOR_BTN_FG, bg=COLOR_BTN_STOP,
+                                    relief=tk.FLAT, cursor="hand2",
+                                    command=self._toggle_worker)
+        self.worker_btn.pack(pady=(0, 10))
 
     # -------------------------------------------------------- process control
 
@@ -220,6 +283,9 @@ class BlurbManager:
             self.pid = existing
         else:
             self._start_blurb()
+
+        if self._conductor_url:
+            self._start_worker()
 
     def _start_blurb(self):
         proc = subprocess.Popen(
@@ -237,20 +303,53 @@ class BlurbManager:
                 pass
             self.pid = None
 
+    def _start_worker(self):
+        if self._is_worker_alive():
+            return
+        proc = subprocess.Popen(
+            [str(VENV_PYTHON), str(BLURB_DIR / "web_worker.py")],
+            cwd=str(BLURB_DIR),
+        )
+        self.worker_pid = proc.pid
+
+    def _stop_worker(self):
+        if self.worker_pid is not None:
+            try:
+                os.kill(self.worker_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            self.worker_pid = None
+
     def _toggle(self):
         if self._is_process_alive():
             self._stop_blurb()
         else:
             self._start_blurb()
 
+    def _toggle_worker(self):
+        if self._is_worker_alive():
+            self._stop_worker()
+        else:
+            self._start_worker()
+
     def _is_process_alive(self) -> bool:
         if self.pid is None:
             return False
         try:
-            os.kill(self.pid, 0)  # signal 0 = existence check, no actual signal sent
+            os.kill(self.pid, 0)
             return True
         except ProcessLookupError:
             self.pid = None
+            return False
+
+    def _is_worker_alive(self) -> bool:
+        if self.worker_pid is None:
+            return False
+        try:
+            os.kill(self.worker_pid, 0)
+            return True
+        except ProcessLookupError:
+            self.worker_pid = None
             return False
 
     def _on_close(self):
@@ -278,6 +377,7 @@ class BlurbManager:
             self._tray_thread = None
 
     def _quit_app(self):
+        self._stop_worker()
         if self._tray_thread is not None:
             self._tray_thread.quit()
             self._tray_thread = None
@@ -290,6 +390,7 @@ class BlurbManager:
 
     def _fetch_and_update(self):
         alive = self._is_process_alive()
+        worker_alive = self._is_worker_alive()
         stats = None
         if alive:
             try:
@@ -299,30 +400,30 @@ class BlurbManager:
                 resp = self._conn.getresponse()
                 stats = json.loads(resp.read())
             except Exception:
-                self._conn = None  # reconnect next poll
-        # Schedule UI update + next poll on the main thread.
-        # Calling root.after from a background thread is unreliable on Linux.
-        self.root.after(0, lambda: self._apply_and_reschedule(alive, stats))
+                self._conn = None
+        self.root.after(0, lambda: self._apply_and_reschedule(alive, worker_alive, stats))
 
-    def _apply_and_reschedule(self, alive, stats):
+    def _apply_and_reschedule(self, alive, worker_alive, stats):
         self._last_alive = alive
-        self._update_ui(alive, stats)
-        self._update_tray(alive, stats)
+        self._update_ui(alive, worker_alive, stats)
+        self._update_tray(alive, worker_alive, stats)
         self.root.after(POLL_MS, self._schedule_poll)
 
-    def _update_tray(self, alive: bool, stats: dict | None):
+    def _update_tray(self, alive: bool, worker_alive: bool, stats: dict | None):
         if self._tray_thread is None:
             return
         if alive:
             job = (stats or {}).get("active_job_id")
             working = bool(job)
-            title = "Blurb - transcribing" if working else "Blurb - idle"
+            parts = ["Blurb - transcribing" if working else "Blurb - idle"]
         else:
             working = False
-            title = "Blurb - stopped"
-        self._tray_thread.set_state(alive, working, title)
+            parts = ["Blurb - stopped"]
+        if self._conductor_url:
+            parts.append("Pull worker running" if worker_alive else "Pull worker stopped")
+        self._tray_thread.set_state(alive, working, " | ".join(parts))
 
-    def _update_ui(self, alive: bool, stats: dict | None):
+    def _update_ui(self, alive: bool, worker_alive: bool, stats: dict | None):
         if alive:
             self.dot.config(fg=COLOR_RUN)
             self.status_lbl.config(text="Running")
@@ -341,6 +442,16 @@ class BlurbManager:
             self.btn.config(text="Start", bg=COLOR_BTN_START)
             self.job_lbl.config(text="Active job:       —")
             self.queue_lbl.config(text="Jobs in memory:  —")
+
+        if self._conductor_url:
+            if worker_alive:
+                self.worker_dot.config(fg=COLOR_RUN)
+                self.worker_lbl.config(text="Worker:           running")
+                self.worker_btn.config(text="Stop Worker", bg=COLOR_BTN_STOP)
+            else:
+                self.worker_dot.config(fg=COLOR_STOP)
+                self.worker_lbl.config(text="Worker:           stopped")
+                self.worker_btn.config(text="Start Worker", bg=COLOR_BTN_START)
 
 
 if __name__ == "__main__":
