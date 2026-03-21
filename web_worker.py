@@ -6,7 +6,7 @@ transcribes locally using the Whisper model, and posts the result back.
 Runs as a long-lived process managed by blurb_manager.py.
 
 Required env vars (loaded from .env):
-  WEB_URL          e.g. https://api.example.com
+  WEB_URL             e.g. https://api.example.com/api
   BLURB_API_KEY       shared secret for API authentication
 
 Optional:
@@ -15,10 +15,14 @@ Optional:
   POLL_INTERVAL       seconds to wait when no job is available (default: 5)
 """
 
+import json
 import logging
 import os
+import signal
 import sys
+import threading
 import time
+from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
@@ -32,16 +36,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-WEB_URL       = os.environ["WEB_URL"].rstrip("/")
+WEB_URL          = os.environ["WEB_URL"].rstrip("/")
 API_KEY          = os.environ["BLURB_API_KEY"]
 CF_CLIENT_ID     = os.getenv("CF_CLIENT_ID", "")
 CF_CLIENT_SECRET = os.getenv("CF_CLIENT_SECRET", "")
 POLL_INTERVAL    = int(os.getenv("POLL_INTERVAL", "5"))
 
+STATUS_FILE = Path("/tmp/blurb_worker_status.json")
+
 HEADERS: dict[str, str] = {"X-API-Key": API_KEY}
 if CF_CLIENT_ID:
     HEADERS["CF-Access-Client-Id"] = CF_CLIENT_ID
     HEADERS["CF-Access-Client-Secret"] = CF_CLIENT_SECRET
+
+
+def _write_status(state: str, job_id: str | None = None, error: str | None = None) -> None:
+    data: dict = {"state": state}
+    if job_id is not None:
+        data["job_id"] = job_id
+    if error is not None:
+        data["error"] = error
+    try:
+        STATUS_FILE.write_text(json.dumps(data))
+    except Exception:
+        pass
 
 
 def _claim_job() -> dict | None:
@@ -85,23 +103,46 @@ def _fail(job_id: str, error: str) -> None:
         logger.warning(f"Could not report failure: {e}")
 
 
+_BACKOFF_MAX = 12 * 60 * 60  # 12 hours in seconds
+_stop_event  = threading.Event()
+
+
+def _shutdown(signum, frame):
+    _stop_event.set()
+
+signal.signal(signal.SIGTERM, _shutdown)
+
+
+def _sleep(seconds: float) -> bool:
+    """Sleep for up to `seconds`. Returns True if a stop was requested."""
+    return _stop_event.wait(timeout=seconds)
+
+
 def run() -> None:
     # Import here so the model isn't loaded until the worker actually starts
     from transcribe import transcribe_audio
 
     logger.info(f"Pull worker started — polling {WEB_URL}")
-    job_id: str | None = None
+    _write_status("polling")
+    job_id:  str | None = None
+    backoff: float      = POLL_INTERVAL
 
-    while True:
+    while not _stop_event.is_set():
         try:
             job = _claim_job()
             if job is None:
-                time.sleep(POLL_INTERVAL)
+                _write_status("polling")
+                logger.debug(f"No jobs available, sleeping {backoff:.0f}s")
+                if _sleep(backoff):
+                    break
+                backoff = min(backoff * 2, _BACKOFF_MAX)
                 continue
 
+            backoff    = POLL_INTERVAL  # reset on successful claim
             job_id     = job["id"]
             episode_id = job["episode_id"]
             logger.info(f"Claimed job {job_id} (episode {episode_id})")
+            _write_status("transcribing", job_id=job_id)
 
             audio = _fetch_audio(episode_id)
             logger.info(f"Audio fetched ({len(audio):,} bytes), transcribing…")
@@ -112,17 +153,22 @@ def run() -> None:
             _complete(job_id, result)
             logger.info(f"Job {job_id} posted back")
             job_id = None
+            _write_status("polling")
 
         except KeyboardInterrupt:
-            logger.info("Worker stopped")
             break
 
         except Exception as exc:
             logger.error(f"Worker error: {exc}")
+            _write_status("error", job_id=job_id, error=str(exc))
             if job_id:
                 _fail(job_id, str(exc))
                 job_id = None
-            time.sleep(POLL_INTERVAL)
+            if _sleep(POLL_INTERVAL):
+                break
+
+    logger.info("Worker stopped")
+    _write_status("stopped")
 
 
 if __name__ == "__main__":
