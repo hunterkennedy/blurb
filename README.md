@@ -117,10 +117,8 @@ Blurb makes only **outbound** connections — no inbound ports, no firewall chan
 
 **Setup:**
 
-1. Set `WEB_URL`, `BLURB_API_KEY`, and (if using Cloudflare Access) `CF_CLIENT_ID` + `CF_CLIENT_SECRET` in `.env`
+1. Set `WEB_URL` and `BLURB_API_KEY` in `.env`
 2. Launch via the manager GUI, or run `web_worker.py` directly
-
-If the remote service is behind Cloudflare Access, obtain a service token from the Cloudflare Zero Trust dashboard and set `CF_CLIENT_ID` / `CF_CLIENT_SECRET` accordingly.
 
 ---
 
@@ -134,6 +132,4 @@ All settings via `.env`:
 | `WHISPER_COMPUTE_TYPE` | `float16` | Compute precision (`float16`, `int8`, `float32`) |
 | `WEB_URL` | _(empty)_ | Remote API base URL — required for pull-worker mode |
 | `BLURB_API_KEY` | _(empty)_ | Shared API key for remote auth |
-| `CF_CLIENT_ID` | _(empty)_ | Cloudflare Access service token ID |
-| `CF_CLIENT_SECRET` | _(empty)_ | Cloudflare Access service token secret |
 | `POLL_INTERVAL` | `5` | Initial seconds between polls; doubles on each empty response up to 12 hours |

@@ -6,12 +6,10 @@ transcribes locally using the Whisper model, and posts the result back.
 Runs as a long-lived process managed by blurb_manager.py.
 
 Required env vars (loaded from .env):
-  WEB_URL             e.g. https://api.example.com/api
+  WEB_URL             e.g. https://palpal.app/api
   BLURB_API_KEY       shared secret for API authentication
 
 Optional:
-  CF_CLIENT_ID        Cloudflare Access service token ID
-  CF_CLIENT_SECRET    Cloudflare Access service token secret
   POLL_INTERVAL       seconds to wait when no job is available (default: 5)
 """
 
@@ -36,18 +34,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-WEB_URL          = os.environ["WEB_URL"].rstrip("/")
-API_KEY          = os.environ["BLURB_API_KEY"]
-CF_CLIENT_ID     = os.getenv("CF_CLIENT_ID", "")
-CF_CLIENT_SECRET = os.getenv("CF_CLIENT_SECRET", "")
-POLL_INTERVAL    = int(os.getenv("POLL_INTERVAL", "5"))
+WEB_URL       = os.environ["WEB_URL"].rstrip("/")
+API_KEY       = os.environ["BLURB_API_KEY"]
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 
 STATUS_FILE = Path("/tmp/blurb_worker_status.json")
 
 HEADERS: dict[str, str] = {"X-API-Key": API_KEY}
-if CF_CLIENT_ID:
-    HEADERS["CF-Access-Client-Id"] = CF_CLIENT_ID
-    HEADERS["CF-Access-Client-Secret"] = CF_CLIENT_SECRET
 
 
 def _write_status(state: str, job_id: str | None = None, error: str | None = None) -> None:
