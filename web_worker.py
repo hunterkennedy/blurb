@@ -20,6 +20,7 @@ import signal
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -38,9 +39,24 @@ WEB_URL       = os.environ["WEB_URL"].rstrip("/")
 API_KEY       = os.environ["BLURB_API_KEY"]
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 
-STATUS_FILE = Path("/tmp/blurb_worker_status.json")
+STATUS_FILE   = Path("/tmp/blurb_worker_status.json")
+WORKER_ID_FILE = Path(__file__).parent / "worker_id.txt"
 
-HEADERS: dict[str, str] = {"X-API-Key": API_KEY}
+
+def _load_or_create_worker_id() -> str:
+    """Return a stable UUID for this worker instance, creating one if needed."""
+    if WORKER_ID_FILE.exists():
+        wid = WORKER_ID_FILE.read_text().strip()
+        if wid:
+            return wid
+    wid = str(uuid.uuid4())
+    WORKER_ID_FILE.write_text(wid)
+    logger.info(f"Generated new worker ID: {wid}")
+    return wid
+
+
+WORKER_ID = _load_or_create_worker_id()
+HEADERS: dict[str, str] = {"X-API-Key": API_KEY, "X-Worker-ID": WORKER_ID}
 
 
 def _write_status(state: str, job_id: str | None = None, error: str | None = None) -> None:
@@ -76,12 +92,23 @@ def _fetch_audio(episode_id: str) -> bytes:
 
 
 def _complete(job_id: str, result: dict) -> None:
-    httpx.post(
-        f"{WEB_URL}/worker/jobs/{job_id}/complete",
-        json=result,
-        headers=HEADERS,
-        timeout=60,
-    ).raise_for_status()
+    """Post transcript back to conductor. Retries on connection errors."""
+    for attempt in range(3):
+        try:
+            httpx.post(
+                f"{WEB_URL}/worker/jobs/{job_id}/complete",
+                json=result,
+                headers=HEADERS,
+                timeout=60,
+            ).raise_for_status()
+            return
+        except Exception as exc:
+            if attempt < 2:
+                wait = 10 * (attempt + 1)
+                logger.warning(f"Complete attempt {attempt + 1} failed: {exc} — retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _fail(job_id: str, error: str) -> None:
