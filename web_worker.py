@@ -81,14 +81,23 @@ def _claim_job() -> dict | None:
 
 
 def _fetch_audio(episode_id: str) -> bytes:
-    """Download the audio file for a claimed job."""
-    res = httpx.get(
-        f"{WEB_URL}/worker/audio/{episode_id}",
-        headers=HEADERS,
-        timeout=600,
-    )
-    res.raise_for_status()
-    return res.content
+    """Download the audio file for a claimed job. Retries on connection errors."""
+    for attempt in range(3):
+        try:
+            res = httpx.get(
+                f"{WEB_URL}/worker/audio/{episode_id}",
+                headers=HEADERS,
+                timeout=600,
+            )
+            res.raise_for_status()
+            return res.content
+        except Exception as exc:
+            if attempt < 2:
+                wait = 10 * (attempt + 1)
+                logger.warning(f"Audio fetch attempt {attempt + 1} failed: {exc} — retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _complete(job_id: str, result: dict) -> None:
@@ -112,15 +121,22 @@ def _complete(job_id: str, result: dict) -> None:
 
 
 def _fail(job_id: str, error: str) -> None:
-    try:
-        httpx.post(
-            f"{WEB_URL}/worker/jobs/{job_id}/fail",
-            json={"error": error},
-            headers=HEADERS,
-            timeout=10,
-        )
-    except Exception as e:
-        logger.warning(f"Could not report failure: {e}")
+    for attempt in range(3):
+        try:
+            httpx.post(
+                f"{WEB_URL}/worker/jobs/{job_id}/fail",
+                json={"error": error},
+                headers=HEADERS,
+                timeout=10,
+            ).raise_for_status()
+            return
+        except Exception as e:
+            if attempt < 2:
+                wait = 10 * (attempt + 1)
+                logger.warning(f"Fail report attempt {attempt + 1} failed: {e} — retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                logger.warning(f"Could not report failure after 3 attempts: {e}")
 
 
 _BACKOFF_MAX = 12 * 60 * 60  # 12 hours in seconds
