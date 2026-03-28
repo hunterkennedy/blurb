@@ -32,3 +32,4 @@ transcripts/
 
 # API keys (sensitive)
 api_keys.json
+worker_id.txt

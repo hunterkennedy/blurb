@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import secrets
 import json
 import hashlib
 import torch
@@ -20,7 +19,6 @@ load_dotenv()
 
 # Configuration from environment
 MAX_AUDIO_SIZE_MB = int(os.getenv("MAX_AUDIO_SIZE_MB", "256"))
-ADMIN_BEARER_TOKEN = os.getenv("ADMIN_BEARER_TOKEN", "changeme")
 API_KEYS_FILE = Path("api_keys.json")
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "3600"))
 JOB_TTL_SECONDS = 300  # 5 minutes
@@ -61,8 +59,6 @@ async def lifespan(app: FastAPI):
     api_keys = load_api_keys()
     logger.info(f"Loaded {len(api_keys)} API keys from {API_KEYS_FILE}")
     logger.info("Blurb started")
-    logger.info(f"Admin bearer token: {ADMIN_BEARER_TOKEN}")
-    logger.info("Create API keys at POST /api-keys with Authorization: Bearer <token>")
     # Pre-warm model so it's in VRAM before the first request arrives
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, get_model)
@@ -115,21 +111,6 @@ def save_api_keys():
         logger.info(f"Saved {len(data)} API keys to {API_KEYS_FILE}")
     except Exception as e:
         logger.error(f"Failed to save API keys: {e}")
-
-def generate_api_key() -> tuple[str, str]:
-    """Generate API key. Returns (full_key, prefix)"""
-    key = f"blurb_{secrets.token_urlsafe(32)}"
-    prefix = key[:15]
-    return key, prefix
-
-async def verify_admin_token(authorization: str = Header(...)) -> None:
-    """Verify admin bearer token"""
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Invalid authorization header")
-
-    token = authorization[7:]  # Remove "Bearer " prefix
-    if token != ADMIN_BEARER_TOKEN:
-        raise HTTPException(401, "Invalid bearer token")
 
 async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> str:
     """Verify API key and return user identifier"""
@@ -209,30 +190,6 @@ async def process_transcription(job_id: str):
 # ============================================================================
 # API KEY MANAGEMENT ENDPOINTS
 # ============================================================================
-
-@app.post("/api-keys")
-async def create_api_key(
-    name: str = Form(...),
-    admin: None = Depends(verify_admin_token)
-):
-    """Create API key with admin bearer token"""
-    full_key, prefix = generate_api_key()
-
-    api_keys[prefix] = {
-        "hash": hash_api_key(full_key),
-        "name": name,
-        "created_at": datetime.utcnow()
-    }
-
-    # Persist to disk
-    save_api_keys()
-
-    return {
-        "api_key": full_key,
-        "prefix": prefix,
-        "name": name,
-        "message": "Save this key securely - it won't be shown again"
-    }
 
 @app.get("/api-keys")
 async def list_api_keys(user: str = Depends(verify_api_key)):

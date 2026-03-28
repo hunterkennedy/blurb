@@ -59,12 +59,14 @@ WORKER_ID = _load_or_create_worker_id()
 HEADERS: dict[str, str] = {"X-API-Key": API_KEY, "X-Worker-ID": WORKER_ID}
 
 
-def _write_status(state: str, job_id: str | None = None, error: str | None = None) -> None:
+def _write_status(state: str, job_id: str | None = None, error: str | None = None, next_poll_at: float | None = None) -> None:
     data: dict = {"state": state}
     if job_id is not None:
         data["job_id"] = job_id
     if error is not None:
         data["error"] = error
+    if next_poll_at is not None:
+        data["next_poll_at"] = next_poll_at
     try:
         STATUS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -139,7 +141,7 @@ def _fail(job_id: str, error: str) -> None:
                 logger.warning(f"Could not report failure after 3 attempts: {e}")
 
 
-_BACKOFF_MAX = 12 * 60 * 60  # 12 hours in seconds
+_BACKOFF_MAX = 30 * 60  # 30 minutes in seconds
 _stop_event  = threading.Event()
 
 
@@ -167,7 +169,7 @@ def run() -> None:
         try:
             job = _claim_job()
             if job is None:
-                _write_status("polling")
+                _write_status("polling", next_poll_at=time.time() + backoff)
                 logger.debug(f"No jobs available, sleeping {backoff:.0f}s")
                 if _sleep(backoff):
                     break

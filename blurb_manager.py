@@ -10,7 +10,9 @@ import os
 import signal
 import subprocess
 import threading
+import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
@@ -328,7 +330,12 @@ class BlurbManager:
             self.dot.config(fg=COLOR_RUN)
             self.status_lbl.config(text="Polling" if state == "polling" else "Starting…")
             self.btn.config(text="Stop", bg=COLOR_BTN_STOP)
-            self.job_lbl.config(text="Current job:  idle")
+            next_poll_at = status.get("next_poll_at")
+            if state == "polling" and next_poll_at:
+                next_str = datetime.fromtimestamp(next_poll_at).strftime("%H:%M:%S")
+                self.job_lbl.config(text=f"Next poll:  {next_str}")
+            else:
+                self.job_lbl.config(text="Current job:  idle")
 
         if not self._web_url:
             self.btn.config(state=tk.DISABLED, text="Not configured")
