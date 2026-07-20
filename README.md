@@ -13,7 +13,11 @@
 
 Blurb transcribes audio on-GPU using batched Whisper inference and returns timestamped text with word-level timing. It runs on your local machine as a pull-worker — polling a remote service for jobs, transcribing locally, and posting results back. No inbound connections required.
 
-**Requirements:** NVIDIA GPU with CUDA, Linux, Python 3.12, FFmpeg
+Blurb also owns discovery and download: it scrapes YouTube/Patreon sources with yt-dlp and downloads episode audio, both using cookies that live only in this directory. The remote service (conductor) never sees YouTube or Patreon credentials — it only ever hands blurb a source URL or a video/post ID, and gets back scraped entries or a finished transcript.
+
+**Requirements:** Linux, Python 3.12, FFmpeg, Node.js (for yt-dlp's JS challenge solving)
+
+An NVIDIA GPU with CUDA is recommended for speed, but not required — Blurb falls back to CPU otherwise. AMD/Intel GPUs can't be used either way: the Whisper inference engine ([CTranslate2](https://github.com/OpenNMT/CTranslate2)) only has CUDA and CPU backends, no ROCm support.
 
 ---
 
@@ -21,17 +25,15 @@ Blurb transcribes audio on-GPU using batched Whisper inference and returns times
 
 ```bash
 # 1. Install system deps (Fedora example — see below for Ubuntu)
-sudo dnf install -y python3.12 python3.12-tkinter ffmpeg
+sudo dnf install -y python3.12 python3.12-tkinter ffmpeg nodejs
 
 # 2. Run the installer
 ./install.sh
 
-# 3. Configure
-cp .env.example .env
-# Edit .env — see Configuration below
-
-# 4. Launch
+# 3. Launch
 venv-linux/bin/python blurb_manager.py
+# First run opens straight to Settings — paste in your Remote URL and API
+# key there and hit Save. No manual .env editing required.
 ```
 
 ---
@@ -48,19 +50,26 @@ Creates the venv, installs PyTorch with CUDA and all pip dependencies, and copie
 
 ```bash
 # Fedora
-sudo dnf install -y python3.12 python3.12-tkinter ffmpeg
+sudo dnf install -y python3.12 python3.12-tkinter ffmpeg nodejs
 
 # Ubuntu / Debian
-sudo apt install -y python3.12 python3.12-tk ffmpeg
+sudo apt install -y python3.12 python3.12-tk ffmpeg nodejs
 ```
 
 **2. Create venv and install packages**
 
 ```bash
 python3.12 -m venv venv-linux
+
+# With an NVIDIA GPU:
 venv-linux/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Without one (CPU mode, e.g. AMD/Intel GPUs or no GPU at all):
+venv-linux/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
 venv-linux/bin/pip install -r requirements.txt
 ```
+
+`install.sh` picks the right one automatically based on whether `nvidia-smi` is present.
 
 Verify CUDA:
 
@@ -86,7 +95,7 @@ Edit `.env` — see [Configuration](#configuration) for all options.
 venv-linux/bin/python blurb_manager.py
 ```
 
-Opens a control panel that starts the pull-worker automatically, shows live status (polling / transcribing / error), and minimizes to the system tray on close.
+Opens a control panel with a Settings screen for pasting in your Remote URL and API key (saved straight to `.env`, no manual editing needed), a live status view (polling / discovering / transcribing / error, plus a heartbeat-based connection indicator), a Start/Stop toggle, and a system tray icon that reflects the same state when minimized.
 
 ### Headless
 
@@ -100,24 +109,27 @@ Requires `WEB_URL` and `BLURB_API_KEY` to be set in `.env`.
 
 ## How It Works
 
-Blurb makes only **outbound** connections — no inbound ports, no firewall changes, no port forwarding needed.
+Blurb makes only **outbound** connections — no inbound ports, no firewall changes, no port forwarding needed. Audio never crosses the network: blurb downloads it locally and deletes it after transcribing.
 
 ```
-[blurb, home PC]  →  polls WEB_URL  →  [remote service, VPS]
-                  ←  audio file     ←
-                  →  transcript     →
+[blurb, home PC]         polls WEB_URL          [remote service, VPS]
+  yt-dlp + cookies   ───────────────────────►
+  Whisper model      ◄───────────────────────   source URLs / video IDs
+                      ─── entries/transcript ──►
 ```
 
-1. `web_worker.py` polls `GET /worker/jobs/next` on the remote service
-2. On a job: downloads audio via `GET /worker/audio/{episode_id}`
-3. Transcribes locally using the Whisper model
-4. Posts the result to `POST /worker/jobs/{id}/complete`
-5. On error: reports to `POST /worker/jobs/{id}/fail`
-6. On no jobs: backs off exponentially (starting at `POLL_INTERVAL`, doubling each time, up to 12 hours), then retries
+`web_worker.py` polls `GET /worker/jobs/next` and gets back one of two job kinds:
+
+- **`discover`** — `{source_id, site, url, filters}`. Scrapes the source (`discovery.py`, using local cookies) and returns the entries it found.
+- **`process`** — `{episode_id, site, video_id, min_duration_seconds}`. Downloads the audio (`download.py`, using local cookies), transcribes it, and returns the transcript. The audio file lives only in a temp dir on this machine for the duration of the job.
+
+Either way: `POST /worker/jobs/{id}/complete` on success, `POST /worker/jobs/{id}/fail` with `{error, error_type}` on failure (`error_type` is one of `unavailable`, `age_restricted`, `rate_limited`, `too_short`, `other` — conductor uses it to decide whether to blacklist, retry, or fail the episode). On no jobs available, blurb backs off exponentially (starting at `POLL_INTERVAL`, doubling each time, up to 12 hours), then retries.
+
+Since that backoff can stretch to 12 hours while idle, job polling alone isn't a reliable "is blurb still there" signal. A separate background thread posts to `POST /worker/heartbeat` every `HEARTBEAT_INTERVAL` seconds (default 60), independent of job activity — that's what the admin panel's connected/disconnected indicator is based on.
 
 **Setup:**
 
-1. Set `WEB_URL` and `BLURB_API_KEY` in `.env`
+1. Set `WEB_URL` and `BLURB_API_KEY` — via the manager GUI's Settings screen, or directly in `.env` for headless use
 2. Launch via the manager GUI, or run `web_worker.py` directly
 
 ---
@@ -129,7 +141,12 @@ All settings via `.env`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHISPER_MODEL` | `distil-large-v3` | Faster-Whisper model name |
-| `WHISPER_COMPUTE_TYPE` | `float16` | Compute precision (`float16`, `int8`, `float32`) |
+| `WHISPER_DEVICE` | `auto` | `auto` picks CUDA if available, else CPU. Force with `cuda` or `cpu` |
+| `WHISPER_COMPUTE_TYPE` | `float16` (CUDA) / `int8` (CPU) | Compute precision (`float16`, `int8`, `float32`) |
 | `WEB_URL` | _(empty)_ | Remote API base URL — required for pull-worker mode |
 | `BLURB_API_KEY` | _(empty)_ | Shared API key for remote auth |
 | `POLL_INTERVAL` | `5` | Initial seconds between polls; doubles on each empty response up to 12 hours |
+| `YOUTUBE_COOKIES_FILE` | _(empty)_ | Path to a Netscape-format cookies.txt with your YouTube session — only needed for age-restricted videos |
+| `PATREON_COOKIES_FILE` | _(empty)_ | Path to a Netscape-format cookies.txt with your Patreon session — required for any Patreon source |
+
+Cookies are read from these files on every discover/download job — nothing is cached or sent anywhere except directly to YouTube/Patreon by yt-dlp itself.

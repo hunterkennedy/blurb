@@ -4,7 +4,16 @@ cd "$(dirname "$0")"
 set -e
 
 python3.12 -m venv venv-linux
-venv-linux/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+    echo "NVIDIA GPU detected — installing PyTorch with CUDA support"
+    venv-linux/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+else
+    echo "No NVIDIA GPU detected — installing CPU-only PyTorch."
+    echo "Whisper will run on CPU (set WHISPER_DEVICE=cuda in .env to force GPU if this is wrong)."
+    venv-linux/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+fi
+
 venv-linux/bin/pip install -r requirements.txt
 
 echo ""

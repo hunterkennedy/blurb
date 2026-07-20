@@ -18,15 +18,16 @@ def get_model() -> WhisperModel:
     global _model
 
     if _model is None:
-        # Check CUDA availability
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available. This service requires GPU acceleration.")
+        device = os.getenv("WHISPER_DEVICE") or "auto"
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        model_name = os.getenv("WHISPER_MODEL", "distil-large-v3")
-        compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+        model_name = os.getenv("WHISPER_MODEL") or "distil-large-v3"
+        # int8 is the practical default for CPU (float16 has no CPU kernel path in ctranslate2)
+        compute_type = os.getenv("WHISPER_COMPUTE_TYPE") or ("float16" if device == "cuda" else "int8")
 
-        logger.info(f"Loading Faster-Whisper model: {model_name}, compute: {compute_type}")
-        base_model = WhisperModel(model_name, device="cuda", compute_type=compute_type)
+        logger.info(f"Loading Faster-Whisper model: {model_name}, device: {device}, compute: {compute_type}")
+        base_model = WhisperModel(model_name, device=device, compute_type=compute_type)
 
         # Wrap with BatchedInferencePipeline for better performance
         _model = BatchedInferencePipeline(model=base_model)
