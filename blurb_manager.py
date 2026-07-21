@@ -24,7 +24,7 @@ VENV_PYTHON = BLURB_DIR / "venv-linux" / "bin" / "python"
 STATUS_FILE = Path("/tmp/blurb_worker_status.json")
 POLL_MS     = 2000
 
-PAD         = dict(padx=14, pady=6)
+_BASE_PAD   = dict(padx=14, pady=6)
 FONT_LABEL  = ("Sans", 10)
 FONT_STATUS = ("Sans", 11, "bold")
 FONT_SMALL  = ("Sans", 9)
@@ -45,6 +45,33 @@ _STATE_LABELS = {"discover": "Discovering", "process": "Transcribing"}
 # Flag a cookie file as "rotate soon" once it's within this many days of its
 # earliest-expiring persistent cookie.
 _COOKIE_ROTATE_WARNING_DAYS = 7
+
+
+def _detect_ui_scale() -> float:
+    """Best-effort desktop UI scale factor (1.0 == standard 96dpi).
+
+    Tk's own DPI auto-detection uses the X11 core protocol's mm-based screen
+    size, which desktops generally leave at the monitor's raw EDID value even
+    when the user has configured HiDPI scaling via Xft.dpi/GDK_SCALE/
+    QT_SCALE_FACTOR — the settings GTK/Qt/fontconfig apps actually honor. On
+    such a desktop Tk renders at ~1x while everything else renders scaled, so
+    check those sources directly instead of trusting Tk's default.
+    """
+    for var in ("GDK_SCALE", "QT_SCALE_FACTOR"):
+        val = os.environ.get(var)
+        if val:
+            try:
+                return max(1.0, float(val))
+            except ValueError:
+                pass
+    try:
+        out = subprocess.run(["xrdb", "-query"], capture_output=True, text=True, timeout=1)
+        for line in out.stdout.splitlines():
+            if line.startswith("Xft.dpi"):
+                return max(1.0, float(line.split(":")[1].strip()) / 96.0)
+    except Exception:
+        pass
+    return 1.0
 
 
 def _read_env_var(key: str) -> str:
@@ -276,6 +303,9 @@ class BlurbManager:
         self._heartbeat_stale_after = hb_interval * 3
         self._key_visible = False
 
+        self.scale = _detect_ui_scale()
+        self.pad   = {k: self._px(v) for k, v in _BASE_PAD.items()}
+
         self._setup_window()
         self._build_ui()
 
@@ -288,12 +318,20 @@ class BlurbManager:
     def _configured(self) -> bool:
         return bool(self._web_url and self._api_key)
 
+    def _px(self, n: int) -> int:
+        """Scale a literal pixel value to match Tk's detected display scale."""
+        return round(n * self.scale)
+
     # ------------------------------------------------------------------ setup
 
     def _setup_window(self):
+        # Override Tk's own (mm-based, often desktop-scale-blind) DPI guess so
+        # point-sized fonts render at the same scale as our pixel geometry.
+        self.root.tk.call('tk', 'scaling', (96 / 72) * self.scale)
         self.root.title("Blurb")
-        self.root.geometry("320x320")
-        self.root.resizable(False, False)
+        self.root.geometry(f"{self._px(320)}x{self._px(320)}")
+        self.root.minsize(self._px(260), self._px(260))
+        self.root.resizable(True, True)
         self.root.configure(bg=COLOR_BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         try:
@@ -312,7 +350,7 @@ class BlurbManager:
         f = tk.Frame(self.root, bg=COLOR_BG)
 
         top = tk.Frame(f, bg=COLOR_BG)
-        top.pack(fill=tk.X, **PAD)
+        top.pack(fill=tk.X, **self.pad)
 
         self.dot = tk.Label(top, text="●", font=("Sans", 16), fg=COLOR_STOP, bg=COLOR_BG)
         self.dot.pack(side=tk.LEFT)
@@ -364,7 +402,7 @@ class BlurbManager:
         f = tk.Frame(self.root, bg=COLOR_BG)
 
         top = tk.Frame(f, bg=COLOR_BG)
-        top.pack(fill=tk.X, **PAD)
+        top.pack(fill=tk.X, **self.pad)
 
         back = tk.Button(top, text="← Back", font=FONT_LABEL,
                          fg=COLOR_MUTED, bg=COLOR_BG, relief=tk.FLAT, bd=0,
@@ -384,7 +422,7 @@ class BlurbManager:
         url_entry = tk.Entry(body, textvariable=self.url_var, font=FONT_LABEL,
                              bg=COLOR_CARD, fg=COLOR_FG, insertbackground=COLOR_FG,
                              relief=tk.FLAT)
-        url_entry.pack(fill=tk.X, ipady=4, pady=(2, 8))
+        url_entry.pack(fill=tk.X, ipady=self._px(4), pady=(2, 8))
 
         tk.Label(body, text="API Key", anchor="w", font=FONT_LABEL,
                 fg=COLOR_MUTED, bg=COLOR_BG).pack(fill=tk.X)
@@ -394,7 +432,7 @@ class BlurbManager:
         self.key_entry = tk.Entry(key_row, textvariable=self.key_var, font=FONT_LABEL,
                                   show="•", bg=COLOR_CARD, fg=COLOR_FG,
                                   insertbackground=COLOR_FG, relief=tk.FLAT)
-        self.key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        self.key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=self._px(4))
         self.show_btn = tk.Button(key_row, text="Show", font=FONT_SMALL, width=4,
                                   fg=COLOR_BTN_FG, bg=COLOR_CARD, relief=tk.FLAT,
                                   cursor="hand2", command=self._toggle_key_visibility)
@@ -402,7 +440,7 @@ class BlurbManager:
 
         self.settings_error_lbl = tk.Label(body, text="", anchor="w", font=FONT_SMALL,
                                            fg=COLOR_STOP, bg=COLOR_BG,
-                                           wraplength=280, justify=tk.LEFT)
+                                           wraplength=self._px(280), justify=tk.LEFT)
         self.settings_error_lbl.pack(fill=tk.X, pady=(2, 4))
 
         save_btn = tk.Button(body, text="Save", font=("Sans", 10, "bold"),
