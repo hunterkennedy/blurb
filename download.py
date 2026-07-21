@@ -10,33 +10,15 @@ import logging
 import os
 
 from discovery import cookie_file_for, yt_dlp_path
+from errors import (
+    ERROR_TYPE,
+    EpisodeAgeRestrictedError,
+    EpisodeRateLimitedError,
+    EpisodeTooShortError,
+    EpisodeUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class EpisodeTooShortError(Exception):
-    """Raised when yt-dlp skips a video because it's below the minimum duration."""
-
-
-class EpisodeUnavailableError(Exception):
-    """Raised when yt-dlp reports the video is private or unavailable."""
-
-
-class EpisodeRateLimitedError(Exception):
-    """Raised when YouTube rate-limits the download request (transient — safe to retry later)."""
-
-
-class EpisodeAgeRestrictedError(Exception):
-    """Raised when the video requires age verification (needs YouTube cookies)."""
-
-
-# Maps our exception classes to the error_type string reported to conductor.
-ERROR_TYPE = {
-    EpisodeUnavailableError: "unavailable",
-    EpisodeAgeRestrictedError: "age_restricted",
-    EpisodeRateLimitedError: "rate_limited",
-    EpisodeTooShortError: "too_short",
-}
 
 
 async def download_audio(site: str, video_id: str, min_duration_seconds: int, workdir: str) -> tuple[str, str | None]:

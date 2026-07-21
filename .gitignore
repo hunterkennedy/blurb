@@ -29,6 +29,7 @@ Thumbs.db
 
 # Transcripts (testing output)
 transcripts/
+!testdata/fixtures/transcripts/
 
 # API keys (sensitive)
 api_keys.json

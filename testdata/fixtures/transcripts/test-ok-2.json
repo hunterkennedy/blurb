@@ -1,0 +1,771 @@
+{
+  "transcript": {
+    "text": "hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf",
+    "segments": [
+      {
+        "start": 0.0,
+        "end": 7.95,
+        "text": " hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf",
+        "words": [
+          {
+            "start": 0.0,
+            "end": 0.35,
+            "word": " hotel",
+            "probability": 0.8
+          },
+          {
+            "start": 0.4,
+            "end": 0.75,
+            "word": " india",
+            "probability": 0.84
+          },
+          {
+            "start": 0.8,
+            "end": 1.15,
+            "word": " juliet",
+            "probability": 0.88
+          },
+          {
+            "start": 1.2,
+            "end": 1.55,
+            "word": " kilo",
+            "probability": 0.92
+          },
+          {
+            "start": 1.6,
+            "end": 1.95,
+            "word": " lima",
+            "probability": 0.96
+          },
+          {
+            "start": 2.0,
+            "end": 2.35,
+            "word": " mike",
+            "probability": 0.8
+          },
+          {
+            "start": 2.4,
+            "end": 2.75,
+            "word": " november",
+            "probability": 0.84
+          },
+          {
+            "start": 2.8,
+            "end": 3.15,
+            "word": " oscar",
+            "probability": 0.88
+          },
+          {
+            "start": 3.2,
+            "end": 3.55,
+            "word": " papa",
+            "probability": 0.92
+          },
+          {
+            "start": 3.6,
+            "end": 3.95,
+            "word": " quebec",
+            "probability": 0.96
+          },
+          {
+            "start": 4.0,
+            "end": 4.35,
+            "word": " romeo",
+            "probability": 0.8
+          },
+          {
+            "start": 4.4,
+            "end": 4.75,
+            "word": " sierra",
+            "probability": 0.84
+          },
+          {
+            "start": 4.8,
+            "end": 5.15,
+            "word": " tango",
+            "probability": 0.88
+          },
+          {
+            "start": 5.2,
+            "end": 5.55,
+            "word": " alpha",
+            "probability": 0.92
+          },
+          {
+            "start": 5.6,
+            "end": 5.95,
+            "word": " bravo",
+            "probability": 0.96
+          },
+          {
+            "start": 6.0,
+            "end": 6.35,
+            "word": " charlie",
+            "probability": 0.8
+          },
+          {
+            "start": 6.4,
+            "end": 6.75,
+            "word": " delta",
+            "probability": 0.84
+          },
+          {
+            "start": 6.8,
+            "end": 7.15,
+            "word": " echo",
+            "probability": 0.88
+          },
+          {
+            "start": 7.2,
+            "end": 7.55,
+            "word": " foxtrot",
+            "probability": 0.92
+          },
+          {
+            "start": 7.6,
+            "end": 7.95,
+            "word": " golf",
+            "probability": 0.96
+          }
+        ]
+      },
+      {
+        "start": 8.0,
+        "end": 15.95,
+        "text": " hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf",
+        "words": [
+          {
+            "start": 8.0,
+            "end": 8.35,
+            "word": " hotel",
+            "probability": 0.8
+          },
+          {
+            "start": 8.4,
+            "end": 8.75,
+            "word": " india",
+            "probability": 0.84
+          },
+          {
+            "start": 8.8,
+            "end": 9.15,
+            "word": " juliet",
+            "probability": 0.88
+          },
+          {
+            "start": 9.2,
+            "end": 9.55,
+            "word": " kilo",
+            "probability": 0.92
+          },
+          {
+            "start": 9.6,
+            "end": 9.95,
+            "word": " lima",
+            "probability": 0.96
+          },
+          {
+            "start": 10.0,
+            "end": 10.35,
+            "word": " mike",
+            "probability": 0.8
+          },
+          {
+            "start": 10.4,
+            "end": 10.75,
+            "word": " november",
+            "probability": 0.84
+          },
+          {
+            "start": 10.8,
+            "end": 11.15,
+            "word": " oscar",
+            "probability": 0.88
+          },
+          {
+            "start": 11.2,
+            "end": 11.55,
+            "word": " papa",
+            "probability": 0.92
+          },
+          {
+            "start": 11.6,
+            "end": 11.95,
+            "word": " quebec",
+            "probability": 0.96
+          },
+          {
+            "start": 12.0,
+            "end": 12.35,
+            "word": " romeo",
+            "probability": 0.8
+          },
+          {
+            "start": 12.4,
+            "end": 12.75,
+            "word": " sierra",
+            "probability": 0.84
+          },
+          {
+            "start": 12.8,
+            "end": 13.15,
+            "word": " tango",
+            "probability": 0.88
+          },
+          {
+            "start": 13.2,
+            "end": 13.55,
+            "word": " alpha",
+            "probability": 0.92
+          },
+          {
+            "start": 13.6,
+            "end": 13.95,
+            "word": " bravo",
+            "probability": 0.96
+          },
+          {
+            "start": 14.0,
+            "end": 14.35,
+            "word": " charlie",
+            "probability": 0.8
+          },
+          {
+            "start": 14.4,
+            "end": 14.75,
+            "word": " delta",
+            "probability": 0.84
+          },
+          {
+            "start": 14.8,
+            "end": 15.15,
+            "word": " echo",
+            "probability": 0.88
+          },
+          {
+            "start": 15.2,
+            "end": 15.55,
+            "word": " foxtrot",
+            "probability": 0.92
+          },
+          {
+            "start": 15.6,
+            "end": 15.95,
+            "word": " golf",
+            "probability": 0.96
+          }
+        ]
+      },
+      {
+        "start": 16.0,
+        "end": 23.95,
+        "text": " hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf",
+        "words": [
+          {
+            "start": 16.0,
+            "end": 16.35,
+            "word": " hotel",
+            "probability": 0.8
+          },
+          {
+            "start": 16.4,
+            "end": 16.75,
+            "word": " india",
+            "probability": 0.84
+          },
+          {
+            "start": 16.8,
+            "end": 17.15,
+            "word": " juliet",
+            "probability": 0.88
+          },
+          {
+            "start": 17.2,
+            "end": 17.55,
+            "word": " kilo",
+            "probability": 0.92
+          },
+          {
+            "start": 17.6,
+            "end": 17.95,
+            "word": " lima",
+            "probability": 0.96
+          },
+          {
+            "start": 18.0,
+            "end": 18.35,
+            "word": " mike",
+            "probability": 0.8
+          },
+          {
+            "start": 18.4,
+            "end": 18.75,
+            "word": " november",
+            "probability": 0.84
+          },
+          {
+            "start": 18.8,
+            "end": 19.15,
+            "word": " oscar",
+            "probability": 0.88
+          },
+          {
+            "start": 19.2,
+            "end": 19.55,
+            "word": " papa",
+            "probability": 0.92
+          },
+          {
+            "start": 19.6,
+            "end": 19.95,
+            "word": " quebec",
+            "probability": 0.96
+          },
+          {
+            "start": 20.0,
+            "end": 20.35,
+            "word": " romeo",
+            "probability": 0.8
+          },
+          {
+            "start": 20.4,
+            "end": 20.75,
+            "word": " sierra",
+            "probability": 0.84
+          },
+          {
+            "start": 20.8,
+            "end": 21.15,
+            "word": " tango",
+            "probability": 0.88
+          },
+          {
+            "start": 21.2,
+            "end": 21.55,
+            "word": " alpha",
+            "probability": 0.92
+          },
+          {
+            "start": 21.6,
+            "end": 21.95,
+            "word": " bravo",
+            "probability": 0.96
+          },
+          {
+            "start": 22.0,
+            "end": 22.35,
+            "word": " charlie",
+            "probability": 0.8
+          },
+          {
+            "start": 22.4,
+            "end": 22.75,
+            "word": " delta",
+            "probability": 0.84
+          },
+          {
+            "start": 22.8,
+            "end": 23.15,
+            "word": " echo",
+            "probability": 0.88
+          },
+          {
+            "start": 23.2,
+            "end": 23.55,
+            "word": " foxtrot",
+            "probability": 0.92
+          },
+          {
+            "start": 23.6,
+            "end": 23.95,
+            "word": " golf",
+            "probability": 0.96
+          }
+        ]
+      },
+      {
+        "start": 24.0,
+        "end": 31.95,
+        "text": " hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf",
+        "words": [
+          {
+            "start": 24.0,
+            "end": 24.35,
+            "word": " hotel",
+            "probability": 0.8
+          },
+          {
+            "start": 24.4,
+            "end": 24.75,
+            "word": " india",
+            "probability": 0.84
+          },
+          {
+            "start": 24.8,
+            "end": 25.15,
+            "word": " juliet",
+            "probability": 0.88
+          },
+          {
+            "start": 25.2,
+            "end": 25.55,
+            "word": " kilo",
+            "probability": 0.92
+          },
+          {
+            "start": 25.6,
+            "end": 25.95,
+            "word": " lima",
+            "probability": 0.96
+          },
+          {
+            "start": 26.0,
+            "end": 26.35,
+            "word": " mike",
+            "probability": 0.8
+          },
+          {
+            "start": 26.4,
+            "end": 26.75,
+            "word": " november",
+            "probability": 0.84
+          },
+          {
+            "start": 26.8,
+            "end": 27.15,
+            "word": " oscar",
+            "probability": 0.88
+          },
+          {
+            "start": 27.2,
+            "end": 27.55,
+            "word": " papa",
+            "probability": 0.92
+          },
+          {
+            "start": 27.6,
+            "end": 27.95,
+            "word": " quebec",
+            "probability": 0.96
+          },
+          {
+            "start": 28.0,
+            "end": 28.35,
+            "word": " romeo",
+            "probability": 0.8
+          },
+          {
+            "start": 28.4,
+            "end": 28.75,
+            "word": " sierra",
+            "probability": 0.84
+          },
+          {
+            "start": 28.8,
+            "end": 29.15,
+            "word": " tango",
+            "probability": 0.88
+          },
+          {
+            "start": 29.2,
+            "end": 29.55,
+            "word": " alpha",
+            "probability": 0.92
+          },
+          {
+            "start": 29.6,
+            "end": 29.95,
+            "word": " bravo",
+            "probability": 0.96
+          },
+          {
+            "start": 30.0,
+            "end": 30.35,
+            "word": " charlie",
+            "probability": 0.8
+          },
+          {
+            "start": 30.4,
+            "end": 30.75,
+            "word": " delta",
+            "probability": 0.84
+          },
+          {
+            "start": 30.8,
+            "end": 31.15,
+            "word": " echo",
+            "probability": 0.88
+          },
+          {
+            "start": 31.2,
+            "end": 31.55,
+            "word": " foxtrot",
+            "probability": 0.92
+          },
+          {
+            "start": 31.6,
+            "end": 31.95,
+            "word": " golf",
+            "probability": 0.96
+          }
+        ]
+      },
+      {
+        "start": 32.0,
+        "end": 39.95,
+        "text": " hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf",
+        "words": [
+          {
+            "start": 32.0,
+            "end": 32.35,
+            "word": " hotel",
+            "probability": 0.8
+          },
+          {
+            "start": 32.4,
+            "end": 32.75,
+            "word": " india",
+            "probability": 0.84
+          },
+          {
+            "start": 32.8,
+            "end": 33.15,
+            "word": " juliet",
+            "probability": 0.88
+          },
+          {
+            "start": 33.2,
+            "end": 33.55,
+            "word": " kilo",
+            "probability": 0.92
+          },
+          {
+            "start": 33.6,
+            "end": 33.95,
+            "word": " lima",
+            "probability": 0.96
+          },
+          {
+            "start": 34.0,
+            "end": 34.35,
+            "word": " mike",
+            "probability": 0.8
+          },
+          {
+            "start": 34.4,
+            "end": 34.75,
+            "word": " november",
+            "probability": 0.84
+          },
+          {
+            "start": 34.8,
+            "end": 35.15,
+            "word": " oscar",
+            "probability": 0.88
+          },
+          {
+            "start": 35.2,
+            "end": 35.55,
+            "word": " papa",
+            "probability": 0.92
+          },
+          {
+            "start": 35.6,
+            "end": 35.95,
+            "word": " quebec",
+            "probability": 0.96
+          },
+          {
+            "start": 36.0,
+            "end": 36.35,
+            "word": " romeo",
+            "probability": 0.8
+          },
+          {
+            "start": 36.4,
+            "end": 36.75,
+            "word": " sierra",
+            "probability": 0.84
+          },
+          {
+            "start": 36.8,
+            "end": 37.15,
+            "word": " tango",
+            "probability": 0.88
+          },
+          {
+            "start": 37.2,
+            "end": 37.55,
+            "word": " alpha",
+            "probability": 0.92
+          },
+          {
+            "start": 37.6,
+            "end": 37.95,
+            "word": " bravo",
+            "probability": 0.96
+          },
+          {
+            "start": 38.0,
+            "end": 38.35,
+            "word": " charlie",
+            "probability": 0.8
+          },
+          {
+            "start": 38.4,
+            "end": 38.75,
+            "word": " delta",
+            "probability": 0.84
+          },
+          {
+            "start": 38.8,
+            "end": 39.15,
+            "word": " echo",
+            "probability": 0.88
+          },
+          {
+            "start": 39.2,
+            "end": 39.55,
+            "word": " foxtrot",
+            "probability": 0.92
+          },
+          {
+            "start": 39.6,
+            "end": 39.95,
+            "word": " golf",
+            "probability": 0.96
+          }
+        ]
+      },
+      {
+        "start": 40.0,
+        "end": 47.95,
+        "text": " hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango alpha bravo charlie delta echo foxtrot golf",
+        "words": [
+          {
+            "start": 40.0,
+            "end": 40.35,
+            "word": " hotel",
+            "probability": 0.8
+          },
+          {
+            "start": 40.4,
+            "end": 40.75,
+            "word": " india",
+            "probability": 0.84
+          },
+          {
+            "start": 40.8,
+            "end": 41.15,
+            "word": " juliet",
+            "probability": 0.88
+          },
+          {
+            "start": 41.2,
+            "end": 41.55,
+            "word": " kilo",
+            "probability": 0.92
+          },
+          {
+            "start": 41.6,
+            "end": 41.95,
+            "word": " lima",
+            "probability": 0.96
+          },
+          {
+            "start": 42.0,
+            "end": 42.35,
+            "word": " mike",
+            "probability": 0.8
+          },
+          {
+            "start": 42.4,
+            "end": 42.75,
+            "word": " november",
+            "probability": 0.84
+          },
+          {
+            "start": 42.8,
+            "end": 43.15,
+            "word": " oscar",
+            "probability": 0.88
+          },
+          {
+            "start": 43.2,
+            "end": 43.55,
+            "word": " papa",
+            "probability": 0.92
+          },
+          {
+            "start": 43.6,
+            "end": 43.95,
+            "word": " quebec",
+            "probability": 0.96
+          },
+          {
+            "start": 44.0,
+            "end": 44.35,
+            "word": " romeo",
+            "probability": 0.8
+          },
+          {
+            "start": 44.4,
+            "end": 44.75,
+            "word": " sierra",
+            "probability": 0.84
+          },
+          {
+            "start": 44.8,
+            "end": 45.15,
+            "word": " tango",
+            "probability": 0.88
+          },
+          {
+            "start": 45.2,
+            "end": 45.55,
+            "word": " alpha",
+            "probability": 0.92
+          },
+          {
+            "start": 45.6,
+            "end": 45.95,
+            "word": " bravo",
+            "probability": 0.96
+          },
+          {
+            "start": 46.0,
+            "end": 46.35,
+            "word": " charlie",
+            "probability": 0.8
+          },
+          {
+            "start": 46.4,
+            "end": 46.75,
+            "word": " delta",
+            "probability": 0.84
+          },
+          {
+            "start": 46.8,
+            "end": 47.15,
+            "word": " echo",
+            "probability": 0.88
+          },
+          {
+            "start": 47.2,
+            "end": 47.55,
+            "word": " foxtrot",
+            "probability": 0.92
+          },
+          {
+            "start": 47.6,
+            "end": 47.95,
+            "word": " golf",
+            "probability": 0.96
+          }
+        ]
+      }
+    ],
+    "language": "en"
+  },
+  "publication_date": "2023-12-31"
+}

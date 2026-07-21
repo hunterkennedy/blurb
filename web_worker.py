@@ -176,11 +176,18 @@ def _handle_discover(payload: dict) -> dict:
 
 def _handle_process(payload: dict) -> dict:
     import download
+    import test_mode
     from transcribe import transcribe_audio  # deferred so the model isn't loaded until first needed
 
     site = payload["site"]
     video_id = payload["video_id"]
     min_duration = payload.get("min_duration_seconds", 0)
+
+    if test_mode.is_test_video(video_id):
+        try:
+            return test_mode.load_transcript(video_id)
+        except tuple(download.ERROR_TYPE.keys()) as exc:
+            raise _JobError(str(exc), download.ERROR_TYPE[type(exc)]) from exc
 
     with tempfile.TemporaryDirectory(prefix="blurb_") as workdir:
         try:

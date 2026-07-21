@@ -20,6 +20,8 @@ import sys
 
 import httpx
 
+import test_mode
+
 logger = logging.getLogger(__name__)
 
 _PATREON_AUDIO_POST_TYPES = {"podcast", "audio_file"}
@@ -267,6 +269,8 @@ async def discover_patreon_source(url: str) -> tuple[list[dict], None]:
 
 async def discover(site: str, url: str) -> dict:
     """Entry point for a 'discover' job. Returns the job result payload."""
+    if test_mode.is_test_source(url):
+        return test_mode.load_discovery(site, url)
     if site == "patreon":
         entries, icon = await discover_patreon_source(url)
     else:

@@ -1,0 +1,47 @@
+{
+  "entries": [
+    {
+      "video_id": "test-yt-01",
+      "title": "Synthetic Episode 01 \u2014 Season Opener",
+      "pub_date": "2024-01-07",
+      "duration": 1337
+    },
+    {
+      "video_id": "test-yt-02",
+      "title": "Synthetic Episode 02 \u2014 Behind the Scenes",
+      "pub_date": "2023-12-31",
+      "duration": 1474
+    },
+    {
+      "video_id": "test-yt-03",
+      "title": "Synthetic Episode 03 \u2014 Fan Mailbag",
+      "pub_date": "2023-12-24",
+      "duration": 1611
+    },
+    {
+      "video_id": "test-yt-04",
+      "title": "Synthetic Episode 04 \u2014 Guest Interview",
+      "pub_date": "2023-12-17",
+      "duration": 1748
+    },
+    {
+      "video_id": "test-yt-05",
+      "title": "Synthetic Episode 05 \u2014 Year in Review",
+      "pub_date": "2023-12-10",
+      "duration": 1885
+    },
+    {
+      "video_id": "test-yt-06",
+      "title": "Synthetic Episode 06 \u2014 Deep Dive",
+      "pub_date": "2023-12-03",
+      "duration": 2022
+    },
+    {
+      "video_id": "test-yt-07",
+      "title": "Synthetic Episode 07 \u2014 Live Q&A",
+      "pub_date": "2023-11-26",
+      "duration": 2159
+    }
+  ],
+  "icon": null
+}
