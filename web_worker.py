@@ -3,8 +3,13 @@ Pull-worker for Blurb.
 
 Polls a remote service for jobs, does the work locally, and posts results
 back. Two job kinds:
-  'discover' — scrape a YouTube/Patreon source (using local cookies)
-  'process'  — download audio (using local cookies) + transcribe it
+  'discover' — scrape a YouTube/Patreon/RSS source (YouTube/Patreon use local
+               cookies; RSS needs none — any auth is embedded in the feed URL)
+  'process'  — download audio (using local cookies for YouTube/Patreon, a
+               plain HTTP stream for RSS) + transcribe it
+             — or, with payload.duration_only=True, just probe a Patreon
+               post's duration via yt-dlp metadata (no download/transcribe),
+               used to backfill episodes processed before duration capture existed
 
 Runs as a long-lived process managed by blurb_manager.py.
 
@@ -175,12 +180,21 @@ def _handle_discover(payload: dict) -> dict:
 
 
 def _handle_process(payload: dict) -> dict:
+    import discovery
     import download
     import test_mode
     from transcribe import transcribe_audio  # deferred so the model isn't loaded until first needed
 
     site = payload["site"]
     video_id = payload["video_id"]
+
+    # Lightweight backfill mode: probe duration via yt-dlp metadata only, no
+    # download/transcribe. Used to fill in duration on episodes that were
+    # already processed before duration capture existed.
+    if payload.get("duration_only"):
+        duration = asyncio.run(discovery.fetch_patreon_post_duration(video_id))
+        return {"duration_seconds": duration}
+
     min_duration = payload.get("min_duration_seconds", 0)
 
     if test_mode.is_test_video(video_id):
@@ -191,8 +205,8 @@ def _handle_process(payload: dict) -> dict:
 
     with tempfile.TemporaryDirectory(prefix="blurb_") as workdir:
         try:
-            file_path, pub_date = asyncio.run(
-                download.download_audio(site, video_id, min_duration, workdir)
+            file_path, pub_date, duration = asyncio.run(
+                download.download_audio(site, video_id, min_duration, workdir, source_url=payload.get("url"))
             )
         except tuple(download.ERROR_TYPE.keys()) as exc:
             raise _JobError(str(exc), download.ERROR_TYPE[type(exc)]) from exc
@@ -204,7 +218,7 @@ def _handle_process(payload: dict) -> dict:
         transcript = transcribe_audio(audio_bytes)
         logger.info(f"Transcription complete — {len(transcript.get('segments', []))} segments")
 
-    return {"transcript": transcript, "publication_date": pub_date}
+    return {"transcript": transcript, "publication_date": pub_date, "duration_seconds": duration}
 
 
 _BACKOFF_MAX = 30 * 60  # 30 minutes in seconds

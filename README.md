@@ -120,8 +120,10 @@ Blurb makes only **outbound** connections — no inbound ports, no firewall chan
 
 `web_worker.py` polls `GET /worker/jobs/next` and gets back one of two job kinds:
 
-- **`discover`** — `{source_id, site, url, filters}`. Scrapes the source (`discovery.py`, using local cookies) and returns the entries it found.
-- **`process`** — `{episode_id, site, video_id, min_duration_seconds}`. Downloads the audio (`download.py`, using local cookies), transcribes it, and returns the transcript. The audio file lives only in a temp dir on this machine for the duration of the job.
+- **`discover`** — `{source_id, site, url, filters}`. Scrapes the source (`discovery.py`) and returns the entries it found. `site` is `youtube`, `patreon`, or `rss`.
+- **`process`** — `{episode_id, site, video_id, min_duration_seconds, url}`. Downloads the audio (`download.py`) and transcribes it, returning the transcript. The audio file lives only in a temp dir on this machine for the duration of the job.
+
+YouTube and Patreon go through yt-dlp using local cookies (see below). **RSS sources need no cookies at all** — `site: "rss"` treats `url` as a plain podcast feed URL and parses/downloads it directly with `httpx`. If the feed requires auth (e.g. a Patreon RSS export like `https://www.patreon.com/rss/<show>?auth=<token>&show=<id>`), the token is just part of the URL — conductor stores and passes it through exactly like any other source URL, no separate credential to configure here.
 
 Either way: `POST /worker/jobs/{id}/complete` on success, `POST /worker/jobs/{id}/fail` with `{error, error_type}` on failure (`error_type` is one of `unavailable`, `age_restricted`, `rate_limited`, `too_short`, `other` — conductor uses it to decide whether to blacklist, retry, or fail the episode). On no jobs available, blurb backs off exponentially (starting at `POLL_INTERVAL`, doubling each time, up to 12 hours), then retries.
 
