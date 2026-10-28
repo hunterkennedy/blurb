@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 set -e
 
 python3.12 -m venv venv-linux
+venv-linux/bin/python -m pip install --upgrade pip setuptools
 
 if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
     echo "NVIDIA GPU detected — installing PyTorch with CUDA support"

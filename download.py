@@ -10,13 +10,16 @@ needed lives in the feed URL itself (see discovery.py's module docstring).
 
 import asyncio
 import glob
+import hashlib
 import logging
 import os
+import re
 from urllib.parse import urlparse
 
 import httpx
 
 import discovery
+import paths
 from discovery import cookie_file_for, yt_dlp_path
 from errors import (
     ERROR_TYPE,
@@ -28,21 +31,46 @@ from errors import (
 
 logger = logging.getLogger(__name__)
 
+# Hard ceiling for an RSS enclosure. A malicious/broken feed can point at an
+# endless stream; without this the worker would happily fill its disk.
+_RSS_MAX_AUDIO_BYTES = int(os.environ.get("RSS_MAX_AUDIO_MB", "1024")) * 1024 * 1024
+
 _AUDIO_EXT_BY_CONTENT_TYPE = {
     "audio/mpeg": "mp3",
     "audio/mp3": "mp3",
     "audio/mp4": "m4a",
     "audio/x-m4a": "m4a",
     "audio/aac": "aac",
+    "audio/aacp": "aac",
     "audio/ogg": "ogg",
+    "audio/opus": "opus",
     "audio/wav": "wav",
     "audio/x-wav": "wav",
+    "audio/webm": "webm",
+    "audio/flac": "flac",
+    "audio/x-flac": "flac",
 }
+
+
+def _safe_audio_stem(video_id: str) -> str:
+    """Turn an episode ID into a safe filename stem.
+
+    RSS GUIDs are not guaranteed to look like YouTube/Patreon IDs: plenty of
+    feeds use a URL (or a slash-containing tag) as the guid. Using that
+    verbatim as a filename either creates a nonexistent subdirectory or
+    exceeds the filename limit, so sanitize it and append a short hash to keep
+    distinct IDs distinct after sanitizing.
+    """
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,100}", video_id):
+        return video_id
+    digest = hashlib.sha256(video_id.encode("utf-8")).hexdigest()[:12]
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", video_id).strip("_-")[:80]
+    return f"{cleaned or 'rss'}-{digest}"
 
 
 def _guess_audio_ext(url: str, content_type: str | None) -> str:
     path_ext = os.path.splitext(urlparse(url).path)[1].lstrip(".").lower()
-    if path_ext and len(path_ext) <= 4:
+    if re.fullmatch(r"[a-z0-9]{1,4}", path_ext):
         return path_ext
     if content_type:
         return _AUDIO_EXT_BY_CONTENT_TYPE.get(content_type.split(";")[0].strip().lower(), "mp3")
@@ -57,22 +85,63 @@ async def _download_rss_audio(video_id: str, feed_url: str | None, workdir: str)
     if not feed_url:
         raise RuntimeError(f"RSS download for {video_id} missing source feed URL")
 
-    enclosure_url = await discovery.find_rss_enclosure(feed_url, video_id)
+    try:
+        enclosure_url = await discovery.find_rss_enclosure(feed_url, video_id)
+    except discovery.RSSFeedError as exc:
+        if exc.status_code in (401, 403, 404, 410):
+            raise EpisodeUnavailableError(str(exc)) from exc
+        if exc.status_code == 429:
+            raise EpisodeRateLimitedError(str(exc)) from exc
+        raise RuntimeError(str(exc)) from exc
+
     if not enclosure_url:
         raise EpisodeUnavailableError(f"RSS item {video_id} no longer in feed")
 
-    logger.info(f"Downloading RSS audio for {video_id}: {enclosure_url}")
+    # Don't log the full enclosure URL: feeds like Patreon's embed the same
+    # private token in the enclosure path that the feed URL carries in ?auth=.
+    logger.info(f"Downloading RSS audio for {video_id} from {urlparse(enclosure_url).hostname}")
 
-    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        async with client.stream("GET", enclosure_url) as resp:
+    try:
+        async with discovery.rss_stream(enclosure_url, timeout=120) as resp:
             if resp.status_code in (401, 403, 404, 410):
                 raise EpisodeUnavailableError(f"RSS enclosure for {video_id} returned {resp.status_code}")
+            if resp.status_code == 429:
+                raise EpisodeRateLimitedError(f"RSS enclosure for {video_id} rate limited (429)")
             resp.raise_for_status()  # anything else unexpected — surfaces as a generic (retryable) failure
+
+            content_length = resp.headers.get("content-length")
+            if content_length and content_length.isdigit() and int(content_length) > _RSS_MAX_AUDIO_BYTES:
+                raise RuntimeError(
+                    f"RSS enclosure for {video_id} exceeds the "
+                    f"{_RSS_MAX_AUDIO_BYTES // (1024 * 1024)} MB limit"
+                )
+
             ext = _guess_audio_ext(enclosure_url, resp.headers.get("content-type"))
-            file_path = os.path.join(workdir, f"{video_id}.{ext}")
+            file_path = os.path.join(workdir, f"{_safe_audio_stem(video_id)}.{ext}")
+            total = 0
+            too_large = False
             with open(file_path, "wb") as f:
                 async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > _RSS_MAX_AUDIO_BYTES:
+                        too_large = True
+                        break
                     f.write(chunk)
+    except discovery.RSSFeedError as exc:
+        if exc.status_code in (401, 403, 404, 410):
+            raise EpisodeUnavailableError(str(exc)) from exc
+        if exc.status_code == 429:
+            raise EpisodeRateLimitedError(str(exc)) from exc
+        raise RuntimeError(str(exc)) from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"RSS enclosure request failed: {type(exc).__name__}") from exc
+
+    if too_large:
+        os.remove(file_path)
+        raise RuntimeError(
+            f"RSS enclosure for {video_id} exceeds the "
+            f"{_RSS_MAX_AUDIO_BYTES // (1024 * 1024)} MB limit"
+        )
 
     logger.info(f"Downloaded to {file_path}")
     return file_path, None, None
@@ -110,7 +179,7 @@ async def download_audio(
         "--print", "duration",
         "--no-simulate",
         "--js-runtimes", "node",
-        "--cache-dir", "/tmp/yt-dlp-cache",
+        "--cache-dir", str(paths.yt_dlp_cache_dir()),
         "-o", output_template,
     ]
 

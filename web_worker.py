@@ -41,6 +41,8 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+import paths
+
 load_dotenv()
 
 logging.basicConfig(
@@ -49,6 +51,12 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+# httpx logs every request URL at INFO. RSS feed/enclosure URLs carry private
+# auth tokens (a Patreon feed's ?auth=.../u/<token>/...), so don't let those
+# reach the worker logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 WEB_URL       = os.environ["WEB_URL"].rstrip("/")
 API_KEY       = os.environ["BLURB_API_KEY"]
@@ -60,7 +68,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 # no work.
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "60"))
 
-STATUS_FILE   = Path("/tmp/blurb_worker_status.json")
+STATUS_FILE   = paths.status_file()
 WORKER_ID_FILE = Path(__file__).parent / "worker_id.txt"
 
 _CLEAR = object()  # sentinel: remove this key from the status file

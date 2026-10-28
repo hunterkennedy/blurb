@@ -19,9 +19,11 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt6.QtCore import QTimer, Qt
 
+import paths
+
 BLURB_DIR   = Path(__file__).parent
 VENV_PYTHON = BLURB_DIR / "venv-linux" / "bin" / "python"
-STATUS_FILE = Path("/tmp/blurb_worker_status.json")
+STATUS_FILE = paths.status_file()
 POLL_MS     = 2000
 
 _BASE_PAD   = dict(padx=14, pady=6)
