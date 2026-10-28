@@ -32,6 +32,7 @@ import logging
 import os
 import queue
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -247,6 +248,93 @@ def _fail(job_id: str, error: str, error_type: str = "other") -> None:
                 logger.warning(f"Could not report failure after 3 attempts: {e}")
 
 
+def _cookie_health(env_key: str) -> dict:
+    path = os.environ.get(env_key, "").strip()
+    if not path:
+        return {"configured": False, "exists": False, "filename": None, "expires_in_days": None}
+    if not os.path.isfile(path):
+        return {
+            "configured": True,
+            "exists": False,
+            "filename": os.path.basename(path),
+            "expires_in_days": None,
+        }
+    expiries: list[float] = []
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 5:
+                    try:
+                        expiry = float(parts[4])
+                    except ValueError:
+                        continue
+                    if expiry > 0:
+                        expiries.append(expiry)
+    except Exception:
+        pass
+    expires_in_days = None
+    if expiries:
+        expires_in_days = round((min(expiries) - time.time()) / 86400, 1)
+    return {
+        "configured": True,
+        "exists": True,
+        "filename": os.path.basename(path),
+        "expires_in_days": expires_in_days,
+    }
+
+
+_health_cache: dict | None = None
+
+
+def _health_snapshot() -> dict:
+    """Non-secret diagnostics for the admin console. Cached for process life."""
+    global _health_cache
+    if _health_cache is not None:
+        return _health_cache
+
+    yt_dlp_version = None
+    try:
+        import discovery  # local import keeps startup light
+        proc = subprocess.run(
+            [discovery.yt_dlp_path(), "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            yt_dlp_version = proc.stdout.strip() or None
+    except Exception:
+        pass
+
+    gpu = None
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if proc.returncode == 0:
+            gpu = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else None
+    except Exception:
+        pass
+
+    _health_cache = {
+        "yt_dlp_version": yt_dlp_version,
+        "python_version": sys.version.split()[0],
+        "platform": sys.platform,
+        "gpu": gpu,
+        "whisper_model": os.getenv("WHISPER_MODEL") or "distil-large-v3",
+        "whisper_device": os.getenv("WHISPER_DEVICE") or "auto",
+        "whisper_compute_type": os.getenv("WHISPER_COMPUTE_TYPE") or "auto",
+        "cookies": {
+            "youtube": _cookie_health("YOUTUBE_COOKIES_FILE"),
+            "patreon": _cookie_health("PATREON_COOKIES_FILE"),
+        },
+    }
+    return _health_cache
+
+
 def _heartbeat_loop() -> None:
     """Runs in its own thread so it keeps firing even while a job is in progress."""
     while not _stop_event.is_set():
@@ -258,6 +346,7 @@ def _heartbeat_loop() -> None:
                 "job_id": status.get("job_id"),
                 "detail": status.get("error") or status.get("detail"),
                 "progress": status.get("progress") or {},
+                "health": _health_snapshot(),
             }
             httpx.post(
                 f"{WEB_URL}/worker/heartbeat",
