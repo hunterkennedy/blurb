@@ -630,7 +630,15 @@ class BlurbManager:
             self.dot.config(fg=COLOR_WORK)
             self.status_lbl.config(text=label)
             self.btn.config(text="Stop", bg=COLOR_BTN_STOP)
-            detail = f"{label}:  {site or job_id or '—'}"
+            stage = status.get("stage") or ""
+            progress = status.get("progress") or {}
+            pct = progress.get("percent") if isinstance(progress, dict) else None
+            if pct is not None:
+                detail = f"{stage.title() or label}:  {pct:.0f}%"
+            elif stage:
+                detail = f"{stage.title()}:  {site or job_id or '—'}"
+            else:
+                detail = f"{label}:  {site or job_id or '—'}"
             self.job_lbl.config(text=detail[:40])
         elif state == "error":
             self.dot.config(fg=COLOR_STOP)

@@ -127,7 +127,9 @@ YouTube and Patreon go through yt-dlp using local cookies (see below). **RSS sou
 
 Either way: `POST /worker/jobs/{id}/complete` on success, `POST /worker/jobs/{id}/fail` with `{error, error_type}` on failure (`error_type` is one of `unavailable`, `age_restricted`, `rate_limited`, `too_short`, `other` — conductor uses it to decide whether to blacklist, retry, or fail the episode). On no jobs available, blurb backs off exponentially (starting at `POLL_INTERVAL`, doubling each time, up to 12 hours), then retries.
 
-Since that backoff can stretch to 12 hours while idle, job polling alone isn't a reliable "is blurb still there" signal. A separate background thread posts to `POST /worker/heartbeat` every `HEARTBEAT_INTERVAL` seconds (default 60), independent of job activity — that's what the admin panel's connected/disconnected indicator is based on.
+Since that backoff can stretch to 12 hours while idle, job polling alone isn't a reliable "is blurb still there" signal. A separate background thread posts to `POST /worker/heartbeat` every `HEARTBEAT_INTERVAL` seconds (default 60), independent of job activity — that's what the admin panel's connected/disconnected indicator is based on. Heartbeats also carry the worker's current state/stage, so the admin console can show what blurb is doing right now.
+
+While a job is running, blurb additionally posts coarse progress to `POST /worker/jobs/{id}/progress` (`{stage, percent?, detail?}`). Conductor stores it on the job row; the console uses it for live download/transcription progress bars. Progress is advisory — a failed progress post never affects the job.
 
 **Setup:**
 

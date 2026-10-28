@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import signal
 import sys
 import tempfile
@@ -114,6 +115,87 @@ def _update_status(**changes) -> None:
             pass
 
 
+def _read_status() -> dict:
+    """Best-effort snapshot of the on-disk status file (used by heartbeats)."""
+    with _status_lock:
+        try:
+            return json.loads(STATUS_FILE.read_text())
+        except Exception:
+            return {}
+
+
+_last_progress_at = 0.0
+_last_progress_stage = ""
+_progress_queue: "queue.Queue[tuple[str, dict] | None]" = queue.Queue(maxsize=16)
+
+
+def _progress_sender() -> None:
+    """Posts queued progress updates off the worker thread.
+
+    Progress is best-effort and must never stall a download or transcription.
+    A blocking post (or a conductor outage) belongs here, not in the hot path.
+    """
+    while True:
+        item = _progress_queue.get()
+        try:
+            if item is None:
+                return
+            job_id, payload = item
+            httpx.post(
+                f"{WEB_URL}/worker/jobs/{job_id}/progress",
+                json=payload,
+                headers=HEADERS,
+                timeout=5,
+            )
+        except Exception as exc:
+            logger.debug(f"Progress report failed: {exc}")
+        finally:
+            _progress_queue.task_done()
+
+
+def _progress(
+    job_id: str | None,
+    stage: str,
+    percent: float | None = None,
+    detail: str | None = None,
+    *,
+    force: bool = False,
+) -> None:
+    """Best-effort progress report to conductor + local manager status.
+
+    Network delivery is queued to a background thread so a slow/unreachable
+    conductor can never throttle the actual download or transcription.
+    """
+    global _last_progress_at, _last_progress_stage
+
+    now = time.monotonic()
+    # Stage changes always go through; percentage updates at most once a second.
+    if not force and stage == _last_progress_stage and now - _last_progress_at < 1.0:
+        return
+    _last_progress_at = now
+    _last_progress_stage = stage
+
+    payload = {"stage": stage}
+    if percent is not None:
+        payload["percent"] = round(max(0.0, min(100.0, percent)), 1)
+    if detail:
+        payload["detail"] = detail
+
+    _update_status(stage=stage, progress=payload)
+    if not job_id:
+        return
+    try:
+        _progress_queue.put_nowait((job_id, payload))
+    except queue.Full:
+        # Drop the oldest pending update rather than blocking the worker.
+        try:
+            _progress_queue.get_nowait()
+            _progress_queue.task_done()
+            _progress_queue.put_nowait((job_id, payload))
+        except (queue.Empty, queue.Full):
+            pass
+
+
 def _claim_job() -> dict | None:
     """Poll remote for the next pending job. Returns {id, kind, payload} or None."""
     res = httpx.get(f"{WEB_URL}/worker/jobs/next", headers=HEADERS, timeout=30)
@@ -166,7 +248,20 @@ def _heartbeat_loop() -> None:
     """Runs in its own thread so it keeps firing even while a job is in progress."""
     while not _stop_event.is_set():
         try:
-            httpx.post(f"{WEB_URL}/worker/heartbeat", headers=HEADERS, timeout=10).raise_for_status()
+            status = _read_status()
+            payload = {
+                "state": status.get("state"),
+                "stage": status.get("stage"),
+                "job_id": status.get("job_id"),
+                "detail": status.get("error") or status.get("detail"),
+                "progress": status.get("progress") or {},
+            }
+            httpx.post(
+                f"{WEB_URL}/worker/heartbeat",
+                json=payload,
+                headers=HEADERS,
+                timeout=10,
+            ).raise_for_status()
             _update_status(last_heartbeat_at=time.time(), last_heartbeat_ok=True)
         except Exception as exc:
             logger.debug(f"Heartbeat failed: {exc}")
@@ -182,12 +277,15 @@ class _JobError(Exception):
         self.error_type = error_type
 
 
-def _handle_discover(payload: dict) -> dict:
+def _handle_discover(payload: dict, job_id: str | None = None) -> dict:
     import discovery
-    return asyncio.run(discovery.discover(payload["site"], payload["url"]))
+    _progress(job_id, "discovering", None, "scraping source", force=True)
+    result = asyncio.run(discovery.discover(payload["site"], payload["url"]))
+    _progress(job_id, "finishing", 99, "saving discovered entries", force=True)
+    return result
 
 
-def _handle_process(payload: dict) -> dict:
+def _handle_process(payload: dict, job_id: str | None = None) -> dict:
     import discovery
     import download
     import test_mode
@@ -200,6 +298,7 @@ def _handle_process(payload: dict) -> dict:
     # download/transcribe. Used to fill in duration on episodes that were
     # already processed before duration capture existed.
     if payload.get("duration_only"):
+        _progress(job_id, "probing duration", None, "reading metadata", force=True)
         duration = asyncio.run(discovery.fetch_patreon_post_duration(video_id))
         return {"duration_seconds": duration}
 
@@ -207,14 +306,23 @@ def _handle_process(payload: dict) -> dict:
 
     if test_mode.is_test_video(video_id):
         try:
+            _progress(job_id, "transcribing", 99, "using test transcript", force=True)
             return test_mode.load_transcript(video_id)
         except tuple(download.ERROR_TYPE.keys()) as exc:
             raise _JobError(str(exc), download.ERROR_TYPE[type(exc)]) from exc
 
     with tempfile.TemporaryDirectory(prefix="blurb_") as workdir:
         try:
+            def _download_progress(percent: float | None, detail: str | None = None) -> None:
+                _progress(job_id, "downloading", percent, detail)
+
+            _progress(job_id, "downloading", 0, "starting download", force=True)
             file_path, pub_date, duration = asyncio.run(
-                download.download_audio(site, video_id, min_duration, workdir, source_url=payload.get("url"))
+                download.download_audio(
+                    site, video_id, min_duration, workdir,
+                    source_url=payload.get("url"),
+                    progress_cb=_download_progress,
+                )
             )
         except tuple(download.ERROR_TYPE.keys()) as exc:
             raise _JobError(str(exc), download.ERROR_TYPE[type(exc)]) from exc
@@ -223,8 +331,13 @@ def _handle_process(payload: dict) -> dict:
             audio_bytes = f.read()
 
         logger.info(f"Audio downloaded ({len(audio_bytes):,} bytes), transcribing…")
-        transcript = transcribe_audio(audio_bytes)
+        _progress(job_id, "transcribing", 0, "audio downloaded", force=True)
+        transcript = transcribe_audio(
+            audio_bytes,
+            on_progress=lambda pct, detail=None: _progress(job_id, "transcribing", pct, detail),
+        )
         logger.info(f"Transcription complete — {len(transcript.get('segments', []))} segments")
+        _progress(job_id, "finishing", 99, "uploading transcript", force=True)
 
     return {"transcript": transcript, "publication_date": pub_date, "duration_seconds": duration}
 
@@ -247,7 +360,9 @@ def _sleep(seconds: float) -> bool:
 def run() -> None:
     logger.info(f"Pull worker started — polling {WEB_URL}")
     threading.Thread(target=_heartbeat_loop, name="heartbeat", daemon=True).start()
-    _update_status(state="polling", job_id=_CLEAR, site=_CLEAR, error=_CLEAR)
+    threading.Thread(target=_progress_sender, name="progress", daemon=True).start()
+    _update_status(state="polling", job_id=_CLEAR, site=_CLEAR, error=_CLEAR,
+                    stage=_CLEAR, progress=_CLEAR)
     job_id:  str | None = None
     backoff: float      = POLL_INTERVAL
 
@@ -268,21 +383,28 @@ def run() -> None:
             payload = job["payload"]
             logger.info(f"Claimed {kind} job {job_id}")
             _update_status(state=kind, job_id=job_id, site=payload.get("site"),
+                            stage="claimed", progress={"stage": "claimed"},
                             error=_CLEAR, next_poll_at=_CLEAR)
 
-            result = _handle_discover(payload) if kind == "discover" else _handle_process(payload)
+            result = (
+                _handle_discover(payload, job_id)
+                if kind == "discover"
+                else _handle_process(payload, job_id)
+            )
 
             _complete(job_id, result)
             logger.info(f"Job {job_id} posted back")
             job_id = None
-            _update_status(state="polling", job_id=_CLEAR, site=_CLEAR)
+            _update_status(state="polling", job_id=_CLEAR, site=_CLEAR,
+                            stage=_CLEAR, progress=_CLEAR)
 
         except KeyboardInterrupt:
             break
 
         except _JobError as exc:
             logger.error(f"Job {job_id} failed ({exc.error_type}): {exc}")
-            _update_status(state="error", job_id=job_id, error=str(exc))
+            _update_status(state="error", job_id=job_id, error=str(exc),
+                            stage=_CLEAR, progress=_CLEAR)
             if job_id:
                 _fail(job_id, str(exc), error_type=exc.error_type)
                 job_id = None
@@ -291,7 +413,8 @@ def run() -> None:
 
         except Exception as exc:
             logger.error(f"Worker error: {exc}")
-            _update_status(state="error", job_id=job_id, error=str(exc))
+            _update_status(state="error", job_id=job_id, error=str(exc),
+                            stage=_CLEAR, progress=_CLEAR)
             if job_id:
                 _fail(job_id, str(exc), error_type="other")
                 job_id = None
