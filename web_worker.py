@@ -169,8 +169,9 @@ def _progress(
     global _last_progress_at, _last_progress_stage
 
     now = time.monotonic()
+    stage_changed = stage != _last_progress_stage
     # Stage changes always go through; percentage updates at most once a second.
-    if not force and stage == _last_progress_stage and now - _last_progress_at < 1.0:
+    if not force and not stage_changed and now - _last_progress_at < 1.0:
         return
     _last_progress_at = now
     _last_progress_stage = stage
@@ -180,6 +181,8 @@ def _progress(
         payload["percent"] = round(max(0.0, min(100.0, percent)), 1)
     if detail:
         payload["detail"] = detail
+        if stage_changed or force:
+            payload["event"] = detail
 
     _update_status(stage=stage, progress=payload)
     if not job_id:
