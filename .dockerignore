@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.py[cod]
+venv/
+venv-*/
+build/
+dist/
+*.AppImage
+.env
+api_keys.json
+worker_id.txt
+tests/__pycache__
+testdata/__pycache__

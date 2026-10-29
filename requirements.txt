@@ -1,18 +1,19 @@
-# Install PyTorch with CUDA support FIRST using:
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# GPU execution uses CTranslate2's built-in CUDA backend, which loads cuBLAS
+# from the system or from the nvidia-cublas-cu12 wheel. PyTorch/cuDNN are not
+# required (CTranslate2 4.6.3+ has a pure-CUDA Conv1D path for Whisper).
+# scripts/dev-install.sh adds nvidia-cublas-cu12 when an NVIDIA GPU is found.
+# AppImage builds bundle it (see packaging/appimage/build.sh).
 
-fastapi==0.162.0
-uvicorn[standard]==0.54.0
 python-dotenv==1.2.4
-python-multipart==0.0.32
 httpx==0.28.1
 faster-whisper==1.2.1
+ctranslate2==4.8.4
 yt-dlp[default]>=2026.10.26
 PyQt6==6.11.0
 defusedxml==0.7.1
 
 # Security floors for transitive runtime dependencies pulled in by
-# torch/torchvision/requests. Keep these above known-vulnerable versions.
+# huggingface_hub/yt-dlp/requests. Keep these above known-vulnerable versions.
 pillow>=13.0.0
 filelock>=4.2.1
 fsspec>=2026.6.0

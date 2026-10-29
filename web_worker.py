@@ -29,6 +29,7 @@ or a video/post ID and receives back scraped entries or a transcript.
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import queue
 import signal
@@ -45,12 +46,25 @@ from dotenv import load_dotenv
 
 import paths
 
-load_dotenv()
+load_dotenv(paths.env_file())
+
+_log_handlers = []
+try:
+    _log_handlers.append(logging.handlers.RotatingFileHandler(
+        paths.log_file("worker.log"),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    ))
+except OSError:
+    pass
+if sys.stdout is not None and getattr(sys.stdout, "isatty", lambda: False)():
+    _log_handlers.append(logging.StreamHandler(sys.stdout))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
-    stream=sys.stdout,
+    handlers=_log_handlers or [logging.NullHandler()],
 )
 logger = logging.getLogger(__name__)
 
@@ -60,8 +74,11 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-WEB_URL       = os.environ["WEB_URL"].rstrip("/")
-API_KEY       = os.environ["BLURB_API_KEY"]
+WEB_URL       = (os.getenv("WEB_URL") or "").rstrip("/")
+API_KEY       = os.getenv("BLURB_API_KEY") or ""
+if not WEB_URL or not API_KEY:
+    logger.error("WEB_URL and BLURB_API_KEY must be set in %s", paths.env_file())
+    raise SystemExit(2)
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 
 # Job-claim polling backs off up to 12h when idle, so it's a poor connectivity
@@ -71,7 +88,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "60"))
 
 STATUS_FILE   = paths.status_file()
-WORKER_ID_FILE = Path(__file__).parent / "worker_id.txt"
+WORKER_ID_FILE = paths.worker_id_file()
 
 _CLEAR = object()  # sentinel: remove this key from the status file
 _status_lock = threading.Lock()

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Re-enter the frozen Blurb executable in yt-dlp mode. discovery.py and
+# download.py invoke this just like the yt-dlp console script.
+exec "$(dirname "$(readlink -f "$0")")/blurb" --yt-dlp "$@"

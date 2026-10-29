@@ -27,6 +27,11 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
+# AppImage / PyInstaller build output
+build/
+dist/
+*.AppImage
+
 # Transcripts (testing output)
 transcripts/
 !testdata/fixtures/transcripts/

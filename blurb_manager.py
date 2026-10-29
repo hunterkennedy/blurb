@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -21,7 +22,7 @@ from PyQt6.QtCore import QTimer, Qt
 
 import paths
 
-BLURB_DIR   = Path(__file__).parent
+BLURB_DIR   = paths.app_dir()
 VENV_PYTHON = BLURB_DIR / "venv-linux" / "bin" / "python"
 STATUS_FILE = paths.status_file()
 POLL_MS     = 2000
@@ -77,7 +78,7 @@ def _detect_ui_scale() -> float:
 
 
 def _read_env_var(key: str) -> str:
-    env_path = BLURB_DIR / ".env"
+    env_path = paths.env_file()
     if not env_path.exists():
         return ""
     with open(env_path) as f:
@@ -92,14 +93,15 @@ def _write_env_vars(updates: dict) -> None:
     """Update (or append) key=value lines in .env, preserving everything else.
 
     Falls back to .env.example as a starting point if .env doesn't exist yet
-    (matches what install.sh does on first setup).
+    (matches what scripts/dev-install.sh does on first setup). The file holds
+    the API key, so keep it private to the user.
     """
-    env_path = BLURB_DIR / ".env"
+    env_path = paths.env_file()
     if env_path.exists():
         lines = env_path.read_text().splitlines()
     else:
-        example = BLURB_DIR / ".env.example"
-        lines = example.read_text().splitlines() if example.exists() else []
+        example = paths.env_example_file()
+        lines = example.read_text().splitlines() if example else []
 
     remaining = dict(updates)
     for i, line in enumerate(lines):
@@ -114,7 +116,64 @@ def _write_env_vars(updates: dict) -> None:
     for key, value in remaining.items():
         lines.append(f"{key}={value}")
 
+    env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(lines) + "\n")
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _desktop_exec_quote(value: str) -> str:
+    """Quote one argument for a .desktop Exec line (not shell quoting)."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _autostart_command() -> str:
+    """Command a desktop session should run to open the manager."""
+    appimage = os.environ.get("APPIMAGE")
+    if appimage:
+        return _desktop_exec_quote(appimage)
+    if paths.is_frozen():
+        # APPIMAGE should be set for a real AppImage; this is a fallback.
+        return _desktop_exec_quote(sys.executable)
+    return " ".join((
+        _desktop_exec_quote(sys.executable),
+        _desktop_exec_quote(str(paths.app_dir() / "blurb_manager.py")),
+    ))
+
+
+def _autostart_enabled() -> bool:
+    return paths.autostart_file().is_file()
+
+
+def _set_autostart(enabled: bool) -> None:
+    path = paths.autostart_file()
+    if not enabled:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join([
+            "[Desktop Entry]",
+            "Type=Application",
+            "Name=Blurb",
+            "Comment=GPU-accelerated audio transcription worker",
+            f"Exec={_autostart_command()}",
+            "Icon=blurb",
+            "Terminal=false",
+            "X-GNOME-Autostart-enabled=true",
+            "",
+        ])
+    )
+    try:
+        path.chmod(0o644)
+    except OSError:
+        pass
 
 
 def _read_worker_status() -> dict:
@@ -337,7 +396,7 @@ class BlurbManager:
         self.root.configure(bg=COLOR_BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         try:
-            icon = tk.PhotoImage(file=str(BLURB_DIR / "blurb.png"))
+            icon = tk.PhotoImage(file=str(paths.resource_path("blurb.png")))
             self.root.iconphoto(True, icon)
         except Exception:
             pass
@@ -440,6 +499,15 @@ class BlurbManager:
                                   cursor="hand2", command=self._toggle_key_visibility)
         self.show_btn.pack(side=tk.LEFT, padx=(4, 0))
 
+        self.autostart_var = tk.BooleanVar(value=_autostart_enabled())
+        tk.Checkbutton(
+            body, text="Launch at login", variable=self.autostart_var,
+            font=FONT_LABEL, fg=COLOR_FG, bg=COLOR_BG,
+            activebackground=COLOR_BG, activeforeground=COLOR_FG,
+            selectcolor=COLOR_CARD, anchor="w", bd=0,
+            highlightthickness=0, cursor="hand2",
+        ).pack(fill=tk.X, pady=(2, 2))
+
         self.settings_error_lbl = tk.Label(body, text="", anchor="w", font=FONT_SMALL,
                                            fg=COLOR_STOP, bg=COLOR_BG,
                                            wraplength=self._px(280), justify=tk.LEFT)
@@ -463,6 +531,7 @@ class BlurbManager:
     def _show_settings(self):
         self.url_var.set(self._web_url)
         self.key_var.set(self._api_key)
+        self.autostart_var.set(_autostart_enabled())
         self._key_visible = False
         self.key_entry.config(show="•")
         self.show_btn.config(text="Show")
@@ -486,6 +555,12 @@ class BlurbManager:
             self.settings_error_lbl.config(text="Both fields are required.")
             return
 
+        try:
+            _set_autostart(self.autostart_var.get())
+        except OSError as exc:
+            self.settings_error_lbl.config(text=f"Could not update autostart: {exc}")
+            return
+
         _write_env_vars({"WEB_URL": url, "BLURB_API_KEY": key})
         was_alive     = self._is_worker_alive()
         self._web_url = url
@@ -502,13 +577,34 @@ class BlurbManager:
 
     # -------------------------------------------------------- process control
 
+    def _worker_command(self) -> list[str]:
+        """How to start the worker in both source and frozen builds."""
+        if paths.is_frozen():
+            # The AppImage is one executable: re-enter it in worker mode.
+            return [sys.executable, "--worker"]
+        return [str(VENV_PYTHON), str(BLURB_DIR / "web_worker.py")]
+
     def _start_worker(self):
         if not self._configured() or self._is_worker_alive():
             return
+
+        # The worker keeps its own rotating worker.log. Capture anything else
+        # it writes to stdout/stderr (startup tracebacks, third-party noise) in
+        # a per-run console log without duplicating the normal log lines.
+        try:
+            log = open(paths.log_file("worker-console.log"), "w", buffering=1)
+        except OSError:
+            log = subprocess.DEVNULL
+
         proc = subprocess.Popen(
-            [str(VENV_PYTHON), str(BLURB_DIR / "web_worker.py")],
-            cwd=str(BLURB_DIR),
+            self._worker_command(),
+            cwd=str(paths.config_dir() if paths.is_frozen() else BLURB_DIR),
+            stdout=log,
+            stderr=subprocess.STDOUT,
         )
+        if log is not subprocess.DEVNULL:
+            # The child owns its copy of the descriptor after fork.
+            log.close()
         self.worker_pid = proc.pid
 
     def _stop_worker(self):

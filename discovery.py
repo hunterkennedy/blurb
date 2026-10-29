@@ -155,14 +155,28 @@ class RSSFeedError(RuntimeError):
 
 
 def yt_dlp_path() -> str:
-    """Return the yt-dlp executable path, checking PATH then the active venv."""
+    """Return the yt-dlp executable path.
+
+    In the AppImage, yt-dlp runs inside the frozen Blurb executable via a
+    small wrapper next to it (see packaging/appimage/AppRun), because there is
+    no separate Python interpreter to run the console script with.
+    """
+    override = os.environ.get("BLURB_YTDLP")
+    if override and os.path.isfile(override):
+        return override
+
+    if getattr(sys, "frozen", False):
+        wrapper = os.path.join(os.path.dirname(sys.executable), "blurb-yt-dlp")
+        if os.path.isfile(wrapper):
+            return wrapper
+
     found = shutil.which("yt-dlp")
     if found:
         return found
     venv_bin = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
     if os.path.isfile(venv_bin):
         return venv_bin
-    raise FileNotFoundError("yt-dlp not found in PATH or venv")
+    raise FileNotFoundError("yt-dlp not found in PATH, venv, or AppImage bundle")
 
 
 def cookie_file_for(site: str) -> str | None:

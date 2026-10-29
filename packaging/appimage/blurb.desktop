@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Blurb
+GenericName=Audio Transcriber
+Comment=GPU-accelerated audio transcription worker
+Exec=blurb
+Icon=blurb
+Terminal=false
+Categories=AudioVideo;
+Keywords=transcribe;whisper;audio;podcast;
+StartupWMClass=Blurb
+X-AppImage-Version=0.1.0

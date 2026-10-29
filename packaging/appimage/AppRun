@@ -1,0 +1,124 @@
+#!/bin/bash
+# AppRun — entry point for the Blurb AppImage.
+#
+# The CUDA *driver* (libcuda.so.1) always comes from the host. Only the
+# user-space CUDA libraries Blurb needs (cuBLAS/cuBLASLt) are bundled, so the
+# same image works across NVIDIA driver versions and falls back to CPU on
+# machines without an NVIDIA GPU.
+
+set -e
+
+HERE="$(dirname "$(readlink -f "$0")")"
+export APPDIR="${APPDIR:-$HERE}"
+
+# Bundled ffmpeg/ffprobe and Node (used by yt-dlp's YouTube JS challenges).
+export PATH="$APPDIR/usr/lib/blurb/bin:$APPDIR/usr/lib/blurb/node/bin:$APPDIR/usr/bin:$PATH"
+
+# CTranslate2 dlopen()s cuBLAS, so LD_LIBRARY_PATH is enough. Keep any host
+# entries after ours so a host CUDA install can still satisfy other tools.
+if [ -d "$APPDIR/usr/lib/blurb/cuda" ]; then
+    export LD_LIBRARY_PATH="$APPDIR/usr/lib/blurb/cuda${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export BLURB_BACKEND=cuda
+fi
+
+# The ROCm build uses CTranslate2's official ROCm wheel, which links against
+# the host's ROCm 7 user-space libraries. Do not bundle them: they are large
+# and tied to the host kernel driver.
+if [ -d "$APPDIR/usr/lib/blurb/rocm" ]; then
+    # BLURB_ROCM_LIB_DIR supports non-standard/local ROCm installs, e.g. a
+    # directory of extracted RPMs or a prefix other than /opt/rocm.
+    if [ -n "${BLURB_ROCM_LIB_DIR:-}" ] && [ -d "$BLURB_ROCM_LIB_DIR" ]; then
+        export LD_LIBRARY_PATH="$BLURB_ROCM_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        if [ -d "$BLURB_ROCM_LIB_DIR/rocblas/library" ]; then
+            export ROCBLAS_TENSILE_LIBPATH="$BLURB_ROCM_LIB_DIR/rocblas/library"
+        fi
+    fi
+    for rocm_dir in /opt/rocm/lib /opt/rocm/lib/rocm_sysdeps/lib; do
+        if [ -d "$rocm_dir" ]; then
+            export LD_LIBRARY_PATH="$rocm_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        fi
+    done
+    if [ -d /opt/rocm ] && [ -z "${ROCM_PATH:-}" ]; then
+        export ROCM_PATH=/opt/rocm
+    fi
+    if [ -d /opt/rocm/bin ]; then
+        export PATH="$PATH:/opt/rocm/bin"
+    fi
+    if [ -z "${ROCBLAS_TENSILE_LIBPATH:-}" ]; then
+        for rocblas_dir in /usr/lib64/rocblas/library /opt/rocm/lib/rocblas/library; do
+            if [ -d "$rocblas_dir" ]; then
+                export ROCBLAS_TENSILE_LIBPATH="$rocblas_dir"
+                break
+            fi
+        done
+    fi
+    export BLURB_BACKEND=rocm
+
+    # Phoenix/Radeon 780M reports gfx1103, but the ROCm CTranslate2 wheel only
+    # ships gfx1100/1101/1102 kernels. Pretend to be gfx1100 when rocminfo is
+    # available; users can override HSA_OVERRIDE_GFX_VERSION themselves.
+    if [ -z "${HSA_OVERRIDE_GFX_VERSION:-}" ]; then
+        rocminfo_bin="$(command -v rocminfo || true)"
+        if [ -z "$rocminfo_bin" ] && [ -n "${BLURB_ROCM_LIB_DIR:-}" ] \
+            && [ -x "$BLURB_ROCM_LIB_DIR/../bin/rocminfo" ]; then
+            rocminfo_bin="$BLURB_ROCM_LIB_DIR/../bin/rocminfo"
+        fi
+        if [ -n "$rocminfo_bin" ] && "$rocminfo_bin" 2>/dev/null | grep -q 'gfx1103'; then
+            export HSA_OVERRIDE_GFX_VERSION=11.0.0
+        fi
+    fi
+
+    # The ROCm CTranslate2 wheel links the host ROCm runtime. Fail with a
+    # useful message instead of a Python traceback if it isn't installed.
+    rocm_found=0
+    for candidate in \
+        "${BLURB_ROCM_LIB_DIR:-}/libamdhip64.so.7" \
+        /opt/rocm/lib/libamdhip64.so.7 \
+        /usr/lib/x86_64-linux-gnu/libamdhip64.so.7 \
+        /usr/lib64/libamdhip64.so.7; do
+        if [ -e "$candidate" ]; then
+            rocm_found=1
+            break
+        fi
+    done
+    if [ "$rocm_found" = 0 ] && command -v ldconfig >/dev/null 2>&1 \
+        && ldconfig -p 2>/dev/null | grep -q 'libamdhip64\.so\.7'; then
+        rocm_found=1
+    fi
+    if [ "$rocm_found" = 0 ]; then
+        echo "This is the Blurb ROCm build, but ROCm 7.x was not found." >&2
+        echo "Install ROCm 7.x (libamdhip64.so.7) or use Blurb-nvidia-x86_64.AppImage." >&2
+        exit 1
+    fi
+
+    # libamdhip64 dlopen()s COMGR to build GPU code objects. Without it HIP
+    # reports zero devices even though rocminfo sees the GPU.
+    comgr_found=0
+    for candidate in \
+        "${BLURB_ROCM_LIB_DIR:-}/libamd_comgr.so.3" \
+        /opt/rocm/lib/libamd_comgr.so.3 \
+        /usr/lib/x86_64-linux-gnu/libamd_comgr.so.3 \
+        /usr/lib64/libamd_comgr.so.3; do
+        if [ -e "$candidate" ]; then
+            comgr_found=1
+            break
+        fi
+    done
+    if [ "$comgr_found" = 0 ] && command -v ldconfig >/dev/null 2>&1 \
+        && ldconfig -p 2>/dev/null | grep -q 'libamd_comgr\.so\.3'; then
+        comgr_found=1
+    fi
+    if [ "$comgr_found" = 0 ]; then
+        echo "warning: libamd_comgr.so.3 not found; install rocm-comgr or the" >&2
+        echo "         equivalent ROCm 7 package, otherwise Blurb will use CPU." >&2
+    fi
+fi
+
+# yt-dlp is a Python console script normally; in the frozen build it runs
+# through this same executable via a tiny wrapper.
+export BLURB_YTDLP="$APPDIR/usr/bin/blurb-yt-dlp"
+
+# .env, worker id, and logs must live outside the read-only AppImage mount.
+export BLURB_CONFIG_DIR="${BLURB_CONFIG_DIR:-$HOME/.config/blurb}"
+
+exec "$APPDIR/usr/bin/blurb" "$@"
