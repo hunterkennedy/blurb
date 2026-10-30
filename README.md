@@ -68,7 +68,7 @@ For a manual setup, install `requirements.txt` and add `nvidia-cublas-cu12==12.4
 ./Blurb-nvidia-x86_64.AppImage
 ```
 
-The GUI has a live status card, progress, recent jobs, logs, and settings. Settings covers the server connection (with a reachability test), launch at login, automatic worker start, cookie files, and Whisper model/device options. The **Launch at login** toggle writes `~/.config/autostart/blurb.desktop`. Closing the window keeps the worker running in the system tray; use the tray menu to reopen it or quit. In the AppImage, the manager relaunches the same executable with `--worker`.
+The GUI has a live status card, progress, recent jobs, logs, and settings. The footer reports whether the bundled CTranslate2 runtime actually detects a GPU (`GPU: CUDA` / `GPU: ROCm`) or only CPU. Settings covers the server connection (with a reachability test), launch at login, automatic worker start, cookie files, and Whisper model/device options. The **Launch at login** toggle writes `~/.config/autostart/blurb.desktop`. Closing the window keeps the worker running in the system tray; use the tray menu to reopen it or quit. In the AppImage, the manager relaunches the same executable with `--worker`.
 
 For scheduled or one-shot runs, enable **Quit when the queue is empty** in Startup (or set `BLURB_QUIT_WHEN_IDLE=true`). Blurb drains any available jobs, then exits on the first empty poll; the manager closes with it. Network errors and failed jobs do not trigger this.
 

@@ -776,6 +776,43 @@ class _ConnectionTester(QObject):
             self.finished.emit(False, f"Could not reach server: {_shorten(detail, 120)}")
 
 
+class _ComputeDetector(QObject):
+    """Ask the bundled CTranslate2 build what it can actually see."""
+
+    finished = pyqtSignal(str, bool, str)
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        backend = (os.environ.get("BLURB_BACKEND") or "").strip().lower()
+        try:
+            import ctranslate2
+            count = int(ctranslate2.get_cuda_device_count())
+        except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            self.finished.emit(
+                "Compute unknown", False,
+                f"Could not query CTranslate2: {_shorten(detail, 160)}",
+            )
+            return
+
+        if count <= 0:
+            self.finished.emit(
+                "CPU", False,
+                "The bundled CTranslate2 build reports no CUDA/HIP devices.",
+            )
+            return
+
+        label = {"rocm": "ROCm", "cuda": "CUDA"}.get(backend, "CUDA/HIP")
+        plural = "device" if count == 1 else "devices"
+        self.finished.emit(
+            f"GPU: {label}", True,
+            f"The bundled CTranslate2 build detects {count} CUDA/HIP {plural}. "
+            "WHISPER_DEVICE may still override the selected device.",
+        )
+
+
 class LogViewer(QDialog):
     """Read-only, auto-refreshing view of the worker and manager logs."""
 
@@ -948,12 +985,15 @@ class BlurbManager(QMainWindow):
 
         self._tester = _ConnectionTester(self)
         self._tester.finished.connect(self._on_test_finished)
+        self._compute_detector = _ComputeDetector(self)
+        self._compute_detector.finished.connect(self._on_compute_detected)
 
         self._setup_window()
         self._build_ui()
         self._setup_shortcuts()
         self._setup_tray()
         self._load_settings_form()
+        self._compute_detector.start()
         self._settings_check_timer.start()
 
         if self._configured():
@@ -1255,9 +1295,12 @@ class BlurbManager(QMainWindow):
         self.server_lbl.setObjectName("Subtle")
         footer.addWidget(self.server_lbl)
         footer.addStretch(1)
-        local_lbl = QLabel("Audio is processed locally")
-        local_lbl.setObjectName("Subtle")
-        footer.addWidget(local_lbl)
+        self.compute_dot = _Dot(8)
+        footer.addWidget(self.compute_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.compute_lbl = QLabel("Detecting compute…")
+        self.compute_lbl.setObjectName("Subtle")
+        self.compute_lbl.setToolTip("Checking the bundled CTranslate2 build…")
+        footer.addWidget(self.compute_lbl)
         layout.addLayout(footer)
 
         scroll = QScrollArea()
@@ -1760,6 +1803,11 @@ class BlurbManager(QMainWindow):
         self.test_lbl.setText(message)
         self.test_lbl.setStyleSheet(f"color: {COLOR_RUN if ok else COLOR_STOP};")
         self.test_lbl.show()
+
+    def _on_compute_detected(self, label: str, gpu: bool, detail: str) -> None:
+        self.compute_lbl.setText(label)
+        self.compute_lbl.setToolTip(detail)
+        self.compute_dot.set_color(COLOR_RUN if gpu else COLOR_SUBTLE)
 
     def _open_config_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths.config_dir())))
