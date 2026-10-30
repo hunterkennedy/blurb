@@ -895,6 +895,11 @@ class BlurbManager(QMainWindow):
         self._loading = True
         self._key_visible = False
         self._tested_url: str | None = None
+        self._saved_config: dict = {}
+        self._saved_autostart = False
+        self._settings_check_timer = QTimer(self)
+        self._settings_check_timer.setInterval(250)
+        self._settings_check_timer.timeout.connect(self._refresh_save_state)
         self._recent_signature = ""
         self._recent_time_labels: list[tuple[QLabel, float]] = []
         self._tray_icon_key = ""
@@ -929,6 +934,7 @@ class BlurbManager(QMainWindow):
         self._setup_shortcuts()
         self._setup_tray()
         self._load_settings_form()
+        self._settings_check_timer.start()
 
         if self._configured():
             if self._auto_start:
@@ -1465,6 +1471,8 @@ class BlurbManager(QMainWindow):
         self.auto_worker_check.setChecked(self._auto_start)
         self.quit_when_idle_check.setChecked(self._quit_when_idle)
         self._loading = False
+        self._saved_config = self._collect_settings()
+        self._saved_autostart = self.autostart_check.isChecked()
         self._dirty = False
         self.save_btn.setEnabled(False)
         self.save_state_lbl.setText("")
@@ -1473,6 +1481,7 @@ class BlurbManager(QMainWindow):
         self.back_button.setVisible(self._configured())
         self.test_lbl.hide()
         self._refresh_cookie_labels()
+        self._refresh_save_state()
 
     def _collect_settings(self) -> dict:
         device = self.device_combo.currentText().lower()
@@ -1502,14 +1511,41 @@ class BlurbManager(QMainWindow):
         if self._loading:
             return
         self._save_flash_timer.stop()
-        self._dirty = True
         self.settings_error_lbl.setText("")
         self.test_lbl.hide()
-        self.save_state_lbl.setText("Unsaved changes")
-        self.save_state_lbl.setStyleSheet(f"color: {COLOR_WARN};")
-        self.save_btn.setEnabled(bool(
-            self.url_edit.text().strip() and self.key_edit.text().strip()
-        ))
+        self._refresh_save_state()
+
+    def _refresh_save_state(self) -> None:
+        """Recompute dirty/save state from the widgets.
+
+        Called from every editor signal *and* a light poll, so a missed Qt
+        signal or a programmatic value change can't leave Save stuck disabled.
+        """
+        if self._loading or self.stack.currentIndex() != 1:
+            return
+        current = self._collect_settings()
+        valid = bool(current["WEB_URL"] and current["BLURB_API_KEY"])
+        dirty = (
+            current != self._saved_config
+            or self.autostart_check.isChecked() != self._saved_autostart
+        )
+        self._dirty = dirty
+        self.save_btn.setEnabled(valid and dirty)
+        if not valid:
+            self.save_btn.setToolTip("Enter both the remote URL and API key first.")
+        elif not dirty:
+            self.save_btn.setToolTip("No unsaved changes.")
+        else:
+            self.save_btn.setToolTip("Save changes.")
+
+        if not valid:
+            self.save_state_lbl.setText("URL and API key required")
+            self.save_state_lbl.setStyleSheet(f"color: {COLOR_WARN};")
+        elif dirty:
+            self.save_state_lbl.setText("Unsaved changes")
+            self.save_state_lbl.setStyleSheet(f"color: {COLOR_WARN};")
+        elif self.save_state_lbl.text() == "Unsaved changes":
+            self.save_state_lbl.setText("")
 
     def _validate_url(self) -> str | None:
         url = self.url_edit.text().strip()
@@ -1537,6 +1573,12 @@ class BlurbManager(QMainWindow):
             return
 
         updates = self._collect_settings()
+        if (
+            updates == self._saved_config
+            and self.autostart_check.isChecked() == self._saved_autostart
+        ):
+            self._flash_saved("No changes", 1500)
+            return
         try:
             _set_autostart(self.autostart_check.isChecked())
         except OSError as exc:
@@ -1633,6 +1675,7 @@ class BlurbManager(QMainWindow):
         self.show_key_btn.setText("Show")
         self.test_lbl.hide()
         self.stack.setCurrentIndex(1)
+        self._refresh_save_state()
         self.url_edit.setFocus()
 
     def _show_dashboard(self) -> None:
