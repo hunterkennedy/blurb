@@ -10,12 +10,15 @@ Auto-started on login via ~/.config/autostart/blurb.desktop.
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -26,6 +29,7 @@ import httpx
 from PyQt6.QtCore import (
     QObject,
     QSettings,
+    QSignalBlocker,
     Qt,
     QTimer,
     QUrl,
@@ -154,6 +158,18 @@ QFrame#Warning {{
     background: #3a3226;
     border: 1px solid #5c4d2f;
     border-radius: 10px;
+}}
+QFrame#DemoBar {{
+    background: #2a2438;
+    border-bottom: 1px solid {COLOR_BORDER};
+}}
+QLabel#DemoBadge {{
+    background: {COLOR_WARN};
+    color: {COLOR_BTN_FG};
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 700;
 }}
 QPushButton {{
     border: 1px solid transparent;
@@ -883,8 +899,12 @@ class LogViewer(QDialog):
 # ============================================================================
 
 class BlurbManager(QMainWindow):
-    def __init__(self):
+    def __init__(self, demo: bool = False):
         super().__init__()
+        self._demo = demo
+        self._demo_scene = "cycle"
+        self._demo_scene_started = time.monotonic()
+        self._demo_started_at = time.time()
         self._worker_proc: subprocess.Popen | None = None
         self._stopping_proc: subprocess.Popen | None = None
         self._start_error: str | None = None
@@ -916,7 +936,7 @@ class BlurbManager(QMainWindow):
         self._api_key = _read_env_var("BLURB_API_KEY")
         self._auto_start = _read_env_bool("BLURB_AUTO_START_WORKER", True)
         self._quit_when_idle = _read_env_bool("BLURB_QUIT_WHEN_IDLE", False)
-        self._worker_started = False
+        self._worker_started = demo
         self._auto_quit_scheduled = False
         self._quitting = False
         hb_interval_raw = _read_env_var("HEARTBEAT_INTERVAL") or "60"
@@ -980,10 +1000,75 @@ class BlurbManager(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
+        self.demo_combo: QComboBox | None = None
+        if self._demo:
+            outer.addWidget(self._build_demo_bar())
+
         self.stack = QStackedWidget()
         outer.addWidget(self.stack)
         self.stack.addWidget(self._build_dashboard())
         self.stack.addWidget(self._build_settings())
+
+    def _build_demo_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("DemoBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(14, 7, 14, 7)
+        layout.setSpacing(8)
+
+        badge = QLabel("DEMO")
+        badge.setObjectName("DemoBadge")
+        layout.addWidget(badge)
+
+        note = QLabel("simulated data")
+        note.setObjectName("Subtle")
+        layout.addWidget(note)
+        layout.addStretch(1)
+
+        self.demo_combo = QComboBox()
+        self.demo_combo.setAccessibleName("Demo scene")
+        self.demo_combo.addItems([
+            "Auto cycle",
+            "Downloading",
+            "Transcribing",
+            "Waiting for jobs",
+            "Error",
+            "No jobs",
+            "Stopped",
+        ])
+        self.demo_combo.currentTextChanged.connect(self._on_demo_scene_changed)
+        layout.addWidget(self.demo_combo)
+        return bar
+
+    def _on_demo_scene_changed(self, text: str) -> None:
+        mapping = {
+            "Auto cycle": "cycle",
+            "Downloading": "download",
+            "Transcribing": "transcribe",
+            "Waiting for jobs": "idle",
+            "Error": "error",
+            "No jobs": "empty",
+            "Stopped": "stopped",
+        }
+        self._demo_scene = mapping.get(text, "cycle")
+        self._demo_scene_started = time.monotonic()
+        self._on_tick()
+
+    def _set_demo_scene(self, scene: str) -> None:
+        self._demo_scene = scene
+        self._demo_scene_started = time.monotonic()
+        if self.demo_combo is not None:
+            labels = {
+                "cycle": "Auto cycle",
+                "download": "Downloading",
+                "transcribe": "Transcribing",
+                "idle": "Waiting for jobs",
+                "error": "Error",
+                "empty": "No jobs",
+                "stopped": "Stopped",
+            }
+            with QSignalBlocker(self.demo_combo):
+                self.demo_combo.setCurrentText(labels.get(scene, "Auto cycle"))
 
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+Q"), self, activated=self._quit_app)
@@ -1644,6 +1729,20 @@ class BlurbManager(QMainWindow):
             self.test_lbl.setStyleSheet(f"color: {COLOR_STOP};")
             self.test_lbl.show()
             return
+        if self._demo:
+            self.test_btn.setEnabled(False)
+            self.test_btn.setText("Testing…")
+            self.test_lbl.setText("Demo mode: checking simulated connection…")
+            self.test_lbl.setStyleSheet(f"color: {COLOR_MUTED};")
+            self.test_lbl.show()
+            self._tested_url = self.url_edit.text().strip().rstrip("/")
+            QTimer.singleShot(
+                500,
+                lambda: self._on_test_finished(
+                    True, "Demo mode: server reachable (simulated)."
+                ),
+            )
+            return
         self.test_btn.setEnabled(False)
         self.test_btn.setText("Testing…")
         self.test_lbl.setText("Checking server reachability…")
@@ -1694,6 +1793,8 @@ class BlurbManager(QMainWindow):
 
     def _clear_exit_reason(self) -> None:
         """Remove a stale one-shot exit marker before starting a fresh worker."""
+        if self._demo:
+            return
         try:
             data = json.loads(STATUS_FILE.read_text())
         except Exception:
@@ -1707,6 +1808,11 @@ class BlurbManager(QMainWindow):
             pass
 
     def _start_worker(self) -> None:
+        if self._demo:
+            self._set_demo_scene("cycle")
+            if not self._quitting:
+                self._on_tick()
+            return
         if self._stopping_proc is not None:
             if self._stopping_proc.poll() is None:
                 QTimer.singleShot(200, self._start_worker)
@@ -1747,6 +1853,11 @@ class BlurbManager(QMainWindow):
             self._restarting_until = max(self._restarting_until, time.time() + 1.5)
 
     def _stop_worker(self) -> None:
+        if self._demo:
+            self._set_demo_scene("stopped")
+            if not self._quitting:
+                self._on_tick()
+            return
         proc = self._worker_proc
         self._worker_proc = None
         self._pending_start = False
@@ -1762,6 +1873,11 @@ class BlurbManager(QMainWindow):
                 pass
 
     def _restart_worker(self) -> None:
+        if self._demo:
+            self._set_demo_scene("cycle")
+            if not self._quitting:
+                self._on_tick()
+            return
         self._restarting_until = time.time() + 8
         self._stop_worker()
         self._pending_start = True
@@ -1795,6 +1911,8 @@ class BlurbManager(QMainWindow):
             self._start_worker()
 
     def _is_worker_alive(self) -> bool:
+        if self._demo:
+            return self._demo_scene not in ("stopped", "empty")
         proc = self._worker_proc
         if proc is None:
             return False
@@ -1898,6 +2016,17 @@ class BlurbManager(QMainWindow):
 
     def _on_tick(self) -> None:
         self._tick += 1
+        if self._demo:
+            alive, status = self._demo_frame()
+            self._apply_status(alive, status)
+            if self._tick % 5 == 0:
+                self._refresh_cookie_labels()
+            recent = status.get("recent_jobs")
+            if not isinstance(recent, list):
+                recent = []
+            self._update_recent(recent)
+            return
+
         alive = self._is_worker_alive()
         # Keep showing recent history even when the worker is stopped.
         status = _read_worker_status()
@@ -1910,7 +2039,122 @@ class BlurbManager(QMainWindow):
             recent = []
         self._update_recent(recent)
 
+    def _demo_frame(self) -> tuple[bool, dict]:
+        """Build one simulated status snapshot for the demo scene."""
+        now = time.time()
+        elapsed = max(0.0, time.monotonic() - self._demo_scene_started)
+        scene = self._demo_scene
+        phase: float | None = None
+
+        if scene == "cycle":
+            phase = elapsed % 38.0
+            if phase < 10:
+                scene, local = "download", phase
+            elif phase < 26:
+                scene, local = "transcribe", phase - 10
+            elif phase < 31:
+                scene, local = "finishing", phase - 26
+            else:
+                scene, local = "idle", 0.0
+        else:
+            local = elapsed
+
+        recent = [
+            {
+                "job_id": "demo-1", "kind": "process", "site": "youtube.com",
+                "label": "9bZkp7q19f0", "finished_at": self._demo_started_at - 120,
+                "ok": True,
+            },
+            {
+                "job_id": "demo-2", "kind": "process", "site": "patreon.com",
+                "label": "post-1234", "finished_at": self._demo_started_at - 900,
+                "ok": True,
+            },
+            {
+                "job_id": "demo-3", "kind": "discover", "site": "rss.example.com",
+                "label": "", "finished_at": self._demo_started_at - 7200,
+                "ok": False, "error": "Feed returned HTTP 404",
+            },
+        ]
+        status: dict = {
+            "last_heartbeat_at": now - 2,
+            "last_heartbeat_ok": True,
+            "recent_jobs": recent,
+        }
+
+        if scene == "download":
+            pct = min(100.0, (local % 10.0) / 10.0 * 100.0)
+            status.update({
+                "state": "process",
+                "site": "youtube.com",
+                "stage": "downloading",
+                "job_started_at": now - (local % 10.0),
+                "progress": {
+                    "stage": "downloading",
+                    "percent": round(pct, 1),
+                    "detail": f"{pct * 0.48:.1f} / 48.0 MB",
+                },
+            })
+            return True, status
+
+        if scene == "transcribe":
+            pct = min(99.0, (local % 16.0) / 16.0 * 99.0)
+            status.update({
+                "state": "process",
+                "site": "youtube.com",
+                "stage": "transcribing",
+                "job_started_at": now - (local % 16.0),
+                "progress": {
+                    "stage": "transcribing",
+                    "percent": round(pct, 1),
+                    "detail": f"segment {int(pct * 4) + 1}",
+                },
+            })
+            return True, status
+
+        if scene == "finishing":
+            status.update({
+                "state": "process",
+                "site": "youtube.com",
+                "stage": "finishing",
+                "job_started_at": now - 30,
+                "progress": {
+                    "stage": "finishing",
+                    "percent": 99,
+                    "detail": "uploading transcript",
+                },
+            })
+            return True, status
+
+        if scene == "error":
+            status.update({
+                "state": "error",
+                "site": "youtube.com",
+                "error": "HTTP 401 Unauthorized: API key rejected by conductor",
+            })
+            return True, status
+
+        if scene == "empty":
+            status.update({"state": "stopped", "exit_reason": "empty_queue"})
+            return False, status
+
+        if scene == "stopped":
+            status.update({"state": "stopped"})
+            return False, status
+
+        status.update({
+            "state": "polling",
+            "next_poll_at": now + (
+                max(1.0, 38.0 - phase)
+                if phase is not None
+                else max(1.0, 5.0 - (local % 5.0))
+            ),
+        })
+        return True, status
+
     def _maybe_quit_after_empty_queue(self, alive: bool, status: dict) -> None:
+        if self._demo:
+            return
         if (
             self._auto_quit_scheduled
             or not self._quit_when_idle
@@ -2321,8 +2565,24 @@ def _dark_palette() -> QPalette:
     return palette
 
 
-def run() -> None:
+def run(demo: bool = False) -> None:
     """Create the application and show the manager window."""
+    if demo:
+        demo_dir = Path(tempfile.mkdtemp(prefix="blurb-demo-"))
+        os.environ["BLURB_CONFIG_DIR"] = str(demo_dir)
+        os.environ["XDG_CONFIG_HOME"] = str(demo_dir / "xdg-config")
+        (demo_dir / ".env").write_text(
+            "WEB_URL=https://demo.invalid/api\n"
+            "BLURB_API_KEY=demo-key\n"
+            "BLURB_AUTO_START_WORKER=false\n"
+            "BLURB_QUIT_WHEN_IDLE=false\n"
+            "HEARTBEAT_INTERVAL=60\n"
+            "WHISPER_MODEL=distil-large-v3\n"
+            "WHISPER_DEVICE=auto\n"
+        )
+        atexit.register(shutil.rmtree, demo_dir, ignore_errors=True)
+        sys.argv = [arg for arg in sys.argv if arg != "--demo"]
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -2349,10 +2609,10 @@ def run() -> None:
             'width: 10px; height: 6px; }\n'
         )
     app.setStyleSheet(qss)
-    manager = BlurbManager()
+    manager = BlurbManager(demo=demo)
     manager.show()
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    run()
+    run(demo="--demo" in sys.argv[1:])

@@ -64,14 +64,18 @@ def _print_versions() -> None:
     print(f"  LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', '')}")
 
 
-def _run_gui() -> None:
+def _run_gui(demo: bool = False) -> None:
     from blurb_manager import run
 
-    run()
+    run(demo=demo)
 
 
 def main() -> None:
     args = sys.argv[1:]
+
+    if args and args[0] == "--demo":
+        _run_gui(demo=True)
+        return
 
     if args and args[0] == "--worker":
         import web_worker
