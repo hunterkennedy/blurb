@@ -491,7 +491,7 @@ def _handle_process(payload: dict, job_id: str | None = None) -> dict:
             def _download_progress(percent: float | None, detail: str | None = None) -> None:
                 _progress(job_id, "downloading", percent, detail)
 
-            _progress(job_id, "downloading", 0, "starting download", force=True)
+            _progress(job_id, "downloading", None, "starting download", force=True)
             file_path, pub_date, duration = asyncio.run(
                 download.download_audio(
                     site, video_id, min_duration, workdir,
@@ -506,7 +506,7 @@ def _handle_process(payload: dict, job_id: str | None = None) -> dict:
             audio_bytes = f.read()
 
         logger.info(f"Audio downloaded ({len(audio_bytes):,} bytes), transcribing…")
-        _progress(job_id, "transcribing", 0, "audio downloaded", force=True)
+        _progress(job_id, "transcribing", None, "audio downloaded", force=True)
         transcript = transcribe_audio(
             audio_bytes,
             on_progress=lambda pct, detail=None: _progress(job_id, "transcribing", pct, detail),
