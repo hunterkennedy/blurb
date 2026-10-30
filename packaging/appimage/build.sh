@@ -131,9 +131,9 @@ install -m 0644 "$ROOT/blurb.png" "$APPIDIR/usr/share/icons/hicolor/512x512/apps
 ln -sf blurb.png "$APPIDIR/.DirIcon"
 
 # The PyQt6 hook follows the GTK platform theme plugin and drags in a full GTK
-# stack. Blurb only needs the tray icon, so drop that theme (Qt falls back to
-# Fusion) along with Qt features the app never uses. This saves ~30 MB and
-# avoids depending on host GTK libraries.
+# stack. Blurb only needs Qt's Fusion style for the manager window and tray, so
+# drop that theme (Qt falls back to Fusion) along with Qt features the app never
+# uses. This saves ~30 MB and avoids depending on host GTK libraries.
 INTERNAL="$APPIDIR/usr/bin/_internal"
 QT="$INTERNAL/PyQt6/Qt6"
 rm -rf "$QT/translations" \

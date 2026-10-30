@@ -81,6 +81,18 @@ if not WEB_URL or not API_KEY:
     raise SystemExit(2)
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
+
+
+# Optional one-shot mode: after draining the queue, exit on the first empty
+# poll instead of backing off and waiting for new work.
+QUIT_WHEN_IDLE = _env_flag("BLURB_QUIT_WHEN_IDLE")
+
 # Job-claim polling backs off up to 12h when idle, so it's a poor connectivity
 # signal on its own — this runs independently on a short fixed interval so
 # the admin panel's "blurb connected" indicator stays fresh even when there's
@@ -122,6 +134,8 @@ def _update_status(**changes) -> None:
             data = json.loads(STATUS_FILE.read_text())
         except Exception:
             data = {}
+        if not isinstance(data, dict):
+            data = {}
         for key, value in changes.items():
             if value is _CLEAR:
                 data.pop(key, None)
@@ -137,9 +151,61 @@ def _read_status() -> dict:
     """Best-effort snapshot of the on-disk status file (used by heartbeats)."""
     with _status_lock:
         try:
-            return json.loads(STATUS_FILE.read_text())
+            data = json.loads(STATUS_FILE.read_text())
+            return data if isinstance(data, dict) else {}
         except Exception:
             return {}
+
+
+_RECENT_JOB_LIMIT = 5
+
+
+def _job_label(payload: dict) -> str:
+    """A short, non-secret label for the manager's recent-jobs list."""
+    for key in ("title", "video_id"):
+        value = str(payload.get(key) or "").strip()
+        if value and not value.lower().startswith(("http://", "https://")):
+            return value[:80]
+    return ""
+
+
+def _push_recent_job(*, ok: bool, error: str | None = None,
+                     error_type: str | None = None) -> None:
+    """Prepend the job that just finished to the local history.
+
+    Reads the current status under the same lock as _update_status so a
+    heartbeat write can't land in between and clobber the history.
+    """
+    entry: dict = {"finished_at": time.time(), "ok": bool(ok)}
+    with _status_lock:
+        try:
+            data = json.loads(STATUS_FILE.read_text())
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        entry.update({
+            "job_id": data.get("job_id"),
+            "kind": data.get("state"),
+            "site": data.get("site"),
+            "label": data.get("job_label") or "",
+            "started_at": data.get("job_started_at"),
+        })
+        if error:
+            entry["error"] = error
+        if error_type:
+            entry["error_type"] = error_type
+
+        recent = [entry] + [
+            job for job in (data.get("recent_jobs") or [])
+            if isinstance(job, dict) and job.get("job_id") != entry.get("job_id")
+        ]
+        data["recent_jobs"] = recent[:_RECENT_JOB_LIMIT]
+        data["last_job"] = entry
+        try:
+            STATUS_FILE.write_text(json.dumps(data))
+        except Exception:
+            pass
 
 
 _last_progress_at = 0.0
@@ -471,7 +537,8 @@ def run() -> None:
     threading.Thread(target=_heartbeat_loop, name="heartbeat", daemon=True).start()
     threading.Thread(target=_progress_sender, name="progress", daemon=True).start()
     _update_status(state="polling", job_id=_CLEAR, site=_CLEAR, error=_CLEAR,
-                    stage=_CLEAR, progress=_CLEAR)
+                    stage=_CLEAR, progress=_CLEAR,
+                    job_started_at=_CLEAR, job_label=_CLEAR, exit_reason=_CLEAR)
     job_id:  str | None = None
     backoff: float      = POLL_INTERVAL
 
@@ -479,6 +546,16 @@ def run() -> None:
         try:
             job = _claim_job()
             if job is None:
+                if QUIT_WHEN_IDLE:
+                    logger.info(
+                        "No jobs available — exiting because "
+                        "BLURB_QUIT_WHEN_IDLE is enabled"
+                    )
+                    _update_status(state="stopped", exit_reason="empty_queue",
+                                   next_poll_at=_CLEAR, stage=_CLEAR,
+                                   progress=_CLEAR, job_started_at=_CLEAR,
+                                   job_label=_CLEAR)
+                    break
                 _update_status(state="polling", next_poll_at=time.time() + backoff)
                 logger.debug(f"No jobs available, sleeping {backoff:.0f}s")
                 if _sleep(backoff):
@@ -493,6 +570,8 @@ def run() -> None:
             logger.info(f"Claimed {kind} job {job_id}")
             _update_status(state=kind, job_id=job_id, site=payload.get("site"),
                             stage="claimed", progress={"stage": "claimed"},
+                            job_started_at=time.time(),
+                            job_label=_job_label(payload),
                             error=_CLEAR, next_poll_at=_CLEAR)
 
             result = (
@@ -502,18 +581,23 @@ def run() -> None:
             )
 
             _complete(job_id, result)
+            _push_recent_job(ok=True)
             logger.info(f"Job {job_id} posted back")
             job_id = None
             _update_status(state="polling", job_id=_CLEAR, site=_CLEAR,
-                            stage=_CLEAR, progress=_CLEAR)
+                            stage=_CLEAR, progress=_CLEAR,
+                            job_started_at=_CLEAR, job_label=_CLEAR)
 
         except KeyboardInterrupt:
             break
 
         except _JobError as exc:
             logger.error(f"Job {job_id} failed ({exc.error_type}): {exc}")
+            if job_id:
+                _push_recent_job(ok=False, error=str(exc), error_type=exc.error_type)
             _update_status(state="error", job_id=job_id, error=str(exc),
-                            stage=_CLEAR, progress=_CLEAR)
+                            stage=_CLEAR, progress=_CLEAR,
+                            job_started_at=_CLEAR, job_label=_CLEAR)
             if job_id:
                 _fail(job_id, str(exc), error_type=exc.error_type)
                 job_id = None
@@ -522,8 +606,11 @@ def run() -> None:
 
         except Exception as exc:
             logger.error(f"Worker error: {exc}")
+            if job_id:
+                _push_recent_job(ok=False, error=str(exc), error_type="other")
             _update_status(state="error", job_id=job_id, error=str(exc),
-                            stage=_CLEAR, progress=_CLEAR)
+                            stage=_CLEAR, progress=_CLEAR,
+                            job_started_at=_CLEAR, job_label=_CLEAR)
             if job_id:
                 _fail(job_id, str(exc), error_type="other")
                 job_id = None
@@ -531,7 +618,9 @@ def run() -> None:
                 break
 
     logger.info("Worker stopped")
-    _update_status(state="stopped", job_id=_CLEAR, error=_CLEAR, next_poll_at=_CLEAR)
+    _update_status(state="stopped", job_id=_CLEAR, error=_CLEAR, next_poll_at=_CLEAR,
+                   stage=_CLEAR, progress=_CLEAR,
+                   job_started_at=_CLEAR, job_label=_CLEAR)
 
 
 if __name__ == "__main__":

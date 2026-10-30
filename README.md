@@ -46,12 +46,12 @@ If FUSE is unavailable, run with `--appimage-extract-and-run`.
 ## Quick Start (source)
 
 ```bash
-sudo dnf install -y python3.12 python3.12-tkinter ffmpeg nodejs
+sudo dnf install -y python3.12 ffmpeg nodejs
 ./scripts/dev-install.sh
 ./scripts/dev-run.sh
 ```
 
-On Ubuntu/Debian the system packages are `python3.12 python3.12-tk ffmpeg nodejs` (Ubuntu 22.04 needs the deadsnakes PPA for Python 3.12).
+On Ubuntu/Debian the system packages are `python3.12 ffmpeg nodejs` (Ubuntu 22.04 needs the deadsnakes PPA for Python 3.12). The manager GUI is Qt-based; PyQt6 is installed from `requirements.txt`, so no Tk packages are needed.
 
 `scripts/dev-install.sh` creates the venv, installs dependencies, and adds `nvidia-cublas-cu12` when an NVIDIA GPU is detected. PyTorch and cuDNN are not needed. The dev helpers are only for source checkouts; the AppImage has no install step.
 
@@ -67,7 +67,9 @@ For a manual setup, install `requirements.txt` and add `nvidia-cublas-cu12==12.4
 ./Blurb-nvidia-x86_64.AppImage
 ```
 
-The GUI has settings, live status, start/stop, and a tray icon. Settings also has a **Launch at login** toggle, which writes `~/.config/autostart/blurb.desktop`. In the AppImage, the manager relaunches the same executable with `--worker`.
+The GUI has a live status card, progress, recent jobs, logs, and settings. Settings covers the server connection (with a reachability test), launch at login, automatic worker start, cookie files, and Whisper model/device options. The **Launch at login** toggle writes `~/.config/autostart/blurb.desktop`. Closing the window keeps the worker running in the system tray; use the tray menu to reopen it or quit. In the AppImage, the manager relaunches the same executable with `--worker`.
+
+For scheduled or one-shot runs, enable **Quit when the queue is empty** in Startup (or set `BLURB_QUIT_WHEN_IDLE=true`). Blurb drains any available jobs, then exits on the first empty poll; the manager closes with it. Network errors and failed jobs do not trigger this.
 
 **Headless:**
 
@@ -90,6 +92,8 @@ Settings live in `.env`. The AppImage uses `~/.config/blurb/.env`; a source chec
 | `WHISPER_COMPUTE_TYPE` | `float16` GPU / `int8` CPU | `float16`, `int8`, or `float32` |
 | `WEB_URL` | _(empty)_ | Remote API base URL |
 | `BLURB_API_KEY` | _(empty)_ | Shared API key |
+| `BLURB_AUTO_START_WORKER` | `true` | Start the worker when the manager opens |
+| `BLURB_QUIT_WHEN_IDLE` | `false` | Exit after the first poll with an empty queue |
 | `POLL_INTERVAL` | `5` | Initial poll interval; backs off to 12 hours |
 | `HEARTBEAT_INTERVAL` | `60` | Seconds between liveness pings |
 | `YOUTUBE_COOKIES_FILE` | _(empty)_ | Netscape cookies.txt for age-restricted YouTube |

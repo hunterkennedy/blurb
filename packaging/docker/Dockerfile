@@ -23,11 +23,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # The Ubuntu 22.04 archive only has Python 3.10. Blurb needs 3.12 for the
-# current CTranslate2/onnxruntime wheels and for Tkinter support.
+# current CTranslate2/onnxruntime wheels.
 RUN add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3.12 python3.12-venv python3.12-tk libpython3.12 \
+        python3.12 python3.12-venv libpython3.12 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/blurb

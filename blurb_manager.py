@@ -1,92 +1,383 @@
 """
 Blurb Manager — control panel for the Blurb pull-worker.
 
-Manages web_worker.py as a background process and shows live status.
-Auto-started on login via ~/.config/autostart/blurb-manager.desktop.
+Manages web_worker.py as a background process and shows live status. Runs a
+single Qt event loop for both the window and the system tray, so status,
+progress, and the tray icon stay in sync without cross-toolkit plumbing.
+
+Auto-started on login via ~/.config/autostart/blurb.desktop.
 """
 
+from __future__ import annotations
+
 import json
+import math
 import os
 import signal
 import subprocess
 import sys
 import threading
 import time
-import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
-from PyQt6.QtCore import QTimer, Qt
+import httpx
+from PyQt6.QtCore import (
+    QObject,
+    QSettings,
+    Qt,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QSystemTrayIcon,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 import paths
 
 BLURB_DIR   = paths.app_dir()
 VENV_PYTHON = BLURB_DIR / "venv-linux" / "bin" / "python"
 STATUS_FILE = paths.status_file()
-POLL_MS     = 2000
+POLL_MS     = 1000
 
-_BASE_PAD   = dict(padx=14, pady=6)
-FONT_LABEL  = ("Sans", 10)
-FONT_STATUS = ("Sans", 11, "bold")
-FONT_SMALL  = ("Sans", 9)
-COLOR_RUN       = "#2ecc71"
-COLOR_WORK      = "#f39c12"
-COLOR_STOP      = "#e74c3c"
+# Catppuccin Mocha-ish palette. Kept close to the original Tk colours so the
+# app still feels like Blurb, but with enough contrast for small text.
 COLOR_BG        = "#1e1e2e"
-COLOR_FG        = "#cdd6f4"
 COLOR_CARD      = "#313244"
-COLOR_BTN_START = "#a6e3a1"
-COLOR_BTN_STOP  = "#f38ba8"
+COLOR_CARD_DARK = "#262637"
+COLOR_BORDER    = "#45475a"
+COLOR_FG        = "#cdd6f4"
+COLOR_MUTED     = "#a6adc8"
+COLOR_SUBTLE    = "#9ca3bb"
+COLOR_RUN       = "#a6e3a1"
+COLOR_WORK      = "#89b4fa"
+COLOR_WARN      = "#f9e2af"
+COLOR_STOP      = "#f38ba8"
+COLOR_ACCENT    = "#89b4fa"
 COLOR_BTN_FG    = "#1e1e2e"
-COLOR_MUTED     = "#6c7086"
 
 # Human labels for the job kinds web_worker.py reports as `state`.
-_STATE_LABELS = {"discover": "Discovering", "process": "Transcribing"}
+_STATE_LABELS = {"discover": "Discovering", "process": "Working"}
+
+# Per-stage labels inside a process job.
+_STAGE_LABELS = {
+    "claimed": "Preparing",
+    "downloading": "Downloading audio",
+    "transcribing": "Transcribing",
+    "probing duration": "Reading metadata",
+    "finishing": "Saving",
+    "discovering": "Discovering",
+}
 
 # Flag a cookie file as "rotate soon" once it's within this many days of its
 # earliest-expiring persistent cookie.
 _COOKIE_ROTATE_WARNING_DAYS = 7
 
+_APP_QSS = f"""
+QWidget {{
+    color: {COLOR_FG};
+    font-family: "Inter", "Noto Sans", "Cantarell", "DejaVu Sans", sans-serif;
+    font-size: 13px;
+}}
+QMainWindow, QWidget#Root {{
+    background: {COLOR_BG};
+}}
+QLabel#H1 {{
+    font-size: 21px;
+    font-weight: 600;
+}}
+QLabel#H2 {{
+    font-size: 14px;
+    font-weight: 600;
+}}
+QLabel#Status {{
+    font-size: 21px;
+    font-weight: 600;
+}}
+QLabel#Muted {{
+    color: {COLOR_MUTED};
+}}
+QLabel#Subtle {{
+    color: {COLOR_SUBTLE};
+    font-size: 12px;
+}}
+QLabel#FieldLabel {{
+    color: {COLOR_MUTED};
+    font-size: 12px;
+    font-weight: 500;
+}}
+QLabel#ErrorText {{
+    color: {COLOR_STOP};
+    font-size: 12px;
+}}
+QFrame#Card {{
+    background: {COLOR_CARD};
+    border: 1px solid #3b3d52;
+    border-radius: 12px;
+}}
+QFrame#Warning {{
+    background: #3a3226;
+    border: 1px solid #5c4d2f;
+    border-radius: 10px;
+}}
+QPushButton {{
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-weight: 600;
+}}
+QPushButton#Primary {{
+    background: {COLOR_RUN};
+    color: {COLOR_BTN_FG};
+}}
+QPushButton#Primary:hover {{
+    background: #b8ecb4;
+}}
+QPushButton#Primary:pressed {{
+    background: #8fd28b;
+}}
+QPushButton#Danger {{
+    background: {COLOR_STOP};
+    color: {COLOR_BTN_FG};
+}}
+QPushButton#Danger:hover {{
+    background: #f7a8bd;
+}}
+QPushButton#Danger:pressed {{
+    background: #e0708f;
+}}
+QPushButton#Secondary {{
+    background: #3b3d52;
+    color: {COLOR_FG};
+}}
+QPushButton#Secondary:hover {{
+    background: {COLOR_BORDER};
+}}
+QPushButton#Secondary:pressed {{
+    background: #585b70;
+}}
+QPushButton#Ghost {{
+    background: transparent;
+    color: {COLOR_MUTED};
+    padding: 6px 8px;
+}}
+QPushButton#Ghost:hover {{
+    background: {COLOR_CARD};
+    color: {COLOR_FG};
+}}
+QPushButton:disabled {{
+    background: #2a2b3c;
+    color: #585b70;
+}}
+QPushButton:focus {{
+    border: 1px solid {COLOR_ACCENT};
+}}
+QPushButton#Primary:disabled {{
+    background: #2a2b3c;
+    color: #585b70;
+}}
+QPushButton#Danger:disabled {{
+    background: #2a2b3c;
+    color: #585b70;
+}}
+QPushButton#Secondary:disabled {{
+    background: #2a2b3c;
+    color: #585b70;
+}}
+QToolButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 5px 8px;
+    color: {COLOR_MUTED};
+    font-size: 17px;
+}}
+QToolButton:hover {{
+    background: {COLOR_CARD};
+    color: {COLOR_FG};
+}}
+QToolButton:focus {{
+    border: 1px solid {COLOR_ACCENT};
+}}
+QLineEdit, QComboBox {{
+    background: {COLOR_CARD_DARK};
+    border: 1px solid {COLOR_BORDER};
+    border-radius: 8px;
+    padding: 8px 10px;
+    selection-background-color: {COLOR_ACCENT};
+    selection-color: {COLOR_BTN_FG};
+}}
+QLineEdit:focus, QComboBox:focus {{
+    border-color: {COLOR_ACCENT};
+}}
+QLineEdit:disabled, QComboBox:disabled {{
+    color: #585b70;
+}}
+QComboBox {{
+    padding-right: 26px;
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 24px;
+    border: none;
+}}
+QComboBox QAbstractItemView {{
+    background: {COLOR_CARD_DARK};
+    border: 1px solid {COLOR_BORDER};
+    selection-background-color: {COLOR_ACCENT};
+    selection-color: {COLOR_BTN_FG};
+    outline: 0;
+}}
+QCheckBox {{
+    spacing: 8px;
+    color: {COLOR_FG};
+}}
+QCheckBox:focus {{
+    color: {COLOR_ACCENT};
+}}
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid #585b70;
+    background: {COLOR_CARD_DARK};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {COLOR_ACCENT};
+}}
+QCheckBox::indicator:checked {{
+    background: {COLOR_ACCENT};
+    border-color: {COLOR_ACCENT};
+}}
+QProgressBar {{
+    background: {COLOR_CARD_DARK};
+    border: none;
+    border-radius: 4px;
+    min-height: 8px;
+    max-height: 8px;
+}}
+QProgressBar::chunk {{
+    background: {COLOR_WORK};
+    border-radius: 4px;
+}}
+QScrollArea {{
+    border: none;
+    background: transparent;
+}}
+QScrollArea > QWidget,
+QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
+    margin: 0;
+}}
+QScrollBar::handle:vertical {{
+    background: {COLOR_BORDER};
+    border-radius: 4px;
+    min-height: 28px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: #585b70;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+}}
+QPlainTextEdit {{
+    background: #181825;
+    border: 1px solid {COLOR_BORDER};
+    border-radius: 8px;
+    padding: 8px;
+    selection-background-color: {COLOR_ACCENT};
+    selection-color: {COLOR_BTN_FG};
+}}
+QMenu {{
+    background: {COLOR_CARD};
+    border: 1px solid {COLOR_BORDER};
+    padding: 4px;
+}}
+QMenu::item {{
+    padding: 6px 18px;
+    border-radius: 6px;
+}}
+QMenu::item:selected {{
+    background: {COLOR_BORDER};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {COLOR_BORDER};
+    margin: 4px 8px;
+}}
+QToolTip {{
+    background: {COLOR_CARD};
+    color: {COLOR_FG};
+    border: 1px solid {COLOR_BORDER};
+    padding: 4px 6px;
+}}
+"""
 
-def _detect_ui_scale() -> float:
-    """Best-effort desktop UI scale factor (1.0 == standard 96dpi).
 
-    Tk's own DPI auto-detection uses the X11 core protocol's mm-based screen
-    size, which desktops generally leave at the monitor's raw EDID value even
-    when the user has configured HiDPI scaling via Xft.dpi/GDK_SCALE/
-    QT_SCALE_FACTOR — the settings GTK/Qt/fontconfig apps actually honor. On
-    such a desktop Tk renders at ~1x while everything else renders scaled, so
-    check those sources directly instead of trusting Tk's default.
-    """
-    for var in ("GDK_SCALE", "QT_SCALE_FACTOR"):
-        val = os.environ.get(var)
-        if val:
-            try:
-                return max(1.0, float(val))
-            except ValueError:
-                pass
-    try:
-        out = subprocess.run(["xrdb", "-query"], capture_output=True, text=True, timeout=1)
-        for line in out.stdout.splitlines():
-            if line.startswith("Xft.dpi"):
-                return max(1.0, float(line.split(":")[1].strip()) / 96.0)
-    except Exception:
-        pass
-    return 1.0
-
+# ============================================================================
+# Config, status, and cookie helpers
+# ============================================================================
 
 def _read_env_var(key: str) -> str:
     env_path = paths.env_file()
     if not env_path.exists():
         return ""
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith(f"{key}=") and not line.startswith("#"):
-                return line.split("=", 1)[1].strip()
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(f"{key}=") and not line.startswith("#"):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        return ""
     return ""
+
+
+def _read_env_bool(key: str, default: bool) -> bool:
+    raw = _read_env_var(key).strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
 
 
 def _write_env_vars(updates: dict) -> None:
@@ -178,7 +469,8 @@ def _set_autostart(enabled: bool) -> None:
 
 def _read_worker_status() -> dict:
     try:
-        return json.loads(STATUS_FILE.read_text())
+        data = json.loads(STATUS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -217,363 +509,1137 @@ def _cookie_status(env_key: str) -> dict:
     """Presence/expiry status for a *_COOKIES_FILE env var.
 
     Returns {"state": "unset" | "missing" | "unknown" | "expired" | "expiring" | "ok",
-             "expires_at": float | None}
+             "expires_at": float | None, "path": str}
     """
     path_str = _read_env_var(env_key)
     if not path_str:
-        return {"state": "unset", "expires_at": None}
+        return {"state": "unset", "expires_at": None, "path": ""}
 
     path = Path(path_str).expanduser()
     if not path.exists():
-        return {"state": "missing", "expires_at": None}
+        return {"state": "missing", "expires_at": None, "path": path_str}
 
     expiry = _parse_cookie_expiry(path)
     if expiry is None:
-        return {"state": "unknown", "expires_at": None}
+        return {"state": "unknown", "expires_at": None, "path": path_str}
 
     now = time.time()
     if expiry <= now:
-        return {"state": "expired", "expires_at": expiry}
+        return {"state": "expired", "expires_at": expiry, "path": path_str}
     if expiry <= now + _COOKIE_ROTATE_WARNING_DAYS * 86400:
-        return {"state": "expiring", "expires_at": expiry}
-    return {"state": "ok", "expires_at": expiry}
+        return {"state": "expiring", "expires_at": expiry, "path": path_str}
+    return {"state": "ok", "expires_at": expiry, "path": path_str}
 
 
-def _format_cookie_status(label: str, status: dict) -> tuple[str, str]:
-    state      = status["state"]
+def _cookie_words(status: dict) -> tuple[str, str]:
+    """Short status text + colour for a cookie file, for the settings page."""
+    state = status["state"]
     expires_at = status.get("expires_at")
-    date_str   = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d") if expires_at else ""
+    date_str = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d") if expires_at else ""
 
     if state == "unset":
-        return f"{label}:  not configured", COLOR_MUTED
+        return "Not configured", COLOR_SUBTLE
     if state == "missing":
-        return f"{label}:  file missing", COLOR_STOP
+        return "File not found", COLOR_STOP
     if state == "unknown":
-        return f"{label}:  configured", COLOR_RUN
+        return "Configured (no expiry found)", COLOR_RUN
     if state == "expired":
-        return f"{label}:  expired {date_str} — rotate now", COLOR_STOP
+        return f"Expired {date_str}", COLOR_STOP
     if state == "expiring":
-        return f"{label}:  expires {date_str} — rotate soon", COLOR_WORK
-    return f"{label}:  valid until {date_str}", COLOR_RUN
+        days = max(0, math.ceil((expires_at - time.time()) / 86400))
+        day_word = "day" if days == 1 else "days"
+        return f"Expires in {days} {day_word} ({date_str})", COLOR_WARN
+    return f"Valid until {date_str}", COLOR_RUN
+
+
+def _cookie_issue(label: str, status: dict) -> str | None:
+    """One-line warning for the dashboard, or None when nothing is wrong."""
+    state = status["state"]
+    expires_at = status.get("expires_at")
+    if state == "missing":
+        return f"{label} cookie file is missing."
+    if state == "expired":
+        date_str = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d") if expires_at else ""
+        return f"{label} cookies expired {date_str}."
+    if state == "expiring":
+        days = max(0, math.ceil((expires_at - time.time()) / 86400))
+        day_word = "day" if days == 1 else "days"
+        return f"{label} cookies expire in {days} {day_word}."
+    return None
+
+
+def _shorten(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _url_host(url: str) -> str:
+    try:
+        return urlsplit(url).netloc or url
+    except Exception:
+        return url
+
+
+def _relative_time(timestamp: float | None) -> str:
+    if not isinstance(timestamp, (int, float)) or not timestamp:
+        return ""
+    delta = max(0, time.time() - timestamp)
+    if delta < 5:
+        return "just now"
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86400)}d ago"
+
+
+def _format_duration(seconds: float | None) -> str:
+    if not seconds or seconds < 0:
+        return ""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+def _format_countdown(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _status_title(state: str, stage: str, progress: dict) -> str:
+    stage = (stage or (progress or {}).get("stage") or "").strip().lower()
+    if state == "discover":
+        return "Discovering"
+    if state == "process":
+        return _STAGE_LABELS.get(stage, "Working")
+    return _STATE_LABELS.get(state, "Working")
+
+
+def _error_hint(error: str) -> str | None:
+    """A short, actionable explanation for common worker failures."""
+    low = (error or "").lower()
+    if "401" in low or "unauthorized" in low:
+        return "The API key was rejected. Check it in Settings."
+    if "403" in low or "forbidden" in low:
+        return "The server refused access. Check the API key and permissions."
+    if "404" in low:
+        return "The server URL looks wrong — check the path in Settings."
+    if "connection refused" in low or "connect error" in low or "failed to connect" in low:
+        return "Could not reach the server. Check the URL and your network."
+    if "timed out" in low or "timeout" in low:
+        return "The server did not respond in time. It may be offline or busy."
+    if "cookies" in low:
+        return "Open Advanced settings and check the cookie file."
+    if "ffmpeg" in low:
+        return "FFmpeg is missing. Use the AppImage or install ffmpeg."
+    if "no space" in low or "disk" in low:
+        return "The disk may be full."
+    return None
 
 
 # ============================================================================
-# Qt system-tray thread
+# Small widgets / background helpers
 # ============================================================================
 
-class _QtTrayThread(threading.Thread):
-    """Runs a minimal Qt event loop for the system tray icon."""
+def _ensure_check_icon() -> str | None:
+    """Dark check for the custom-styled checkbox indicator."""
+    path = paths.cache_dir() / "check-dark.png"
+    try:
+        if not path.exists():
+            pixmap = QPixmap(16, 16)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(
+                QColor(COLOR_BTN_FG), 2,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            ))
+            painter.drawLine(4, 8, 7, 11)
+            painter.drawLine(7, 11, 12, 5)
+            painter.end()
+            pixmap.save(str(path), "PNG")
+        return path.as_posix()
+    except Exception:
+        return None
 
-    def __init__(self, alive: bool, on_show, on_toggle, on_quit):
-        super().__init__(daemon=True)
-        self._on_show    = on_show
-        self._on_toggle  = on_toggle
-        self._on_quit    = on_quit
-        self._alive      = alive
-        self._working    = False
-        self._title      = "Blurb"
-        self._dirty      = True
-        self._lock       = threading.Lock()
-        self._qt_app: QApplication | None = None
 
-    def set_state(self, alive: bool, working: bool, title: str):
-        with self._lock:
-            if self._alive != alive or self._working != working or self._title != title:
-                self._alive   = alive
-                self._working = working
-                self._title   = title
-                self._dirty   = True
+def _ensure_arrow_icon() -> str | None:
+    """Chevron for combo boxes; Fusion's default arrow is easy to miss."""
+    path = paths.cache_dir() / "combo-arrow.png"
+    try:
+        if not path.exists():
+            pixmap = QPixmap(20, 12)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(
+                QColor(COLOR_MUTED), 2,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            ))
+            painter.drawLine(4, 4, 10, 9)
+            painter.drawLine(10, 9, 16, 4)
+            painter.end()
+            pixmap.save(str(path), "PNG")
+        return path.as_posix()
+    except Exception:
+        return None
 
-    def quit(self):
-        if self._qt_app is not None:
-            self._qt_app.quit()
 
-    def run(self):
-        self._qt_app = QApplication([])
-        self._tray   = QSystemTrayIcon()
-        self._tray.activated.connect(self._handle_activate)
+class _Dot(QLabel):
+    def __init__(self, size: int = 12, parent=None):
+        super().__init__(parent)
+        self._size = size
+        self.setFixedSize(size, size)
+        self.set_color(COLOR_SUBTLE)
 
-        menu = QMenu()
-        menu.addAction("Show").triggered.connect(self._on_show)
-        self._toggle_act = menu.addAction("Start Worker")
-        self._toggle_act.triggered.connect(self._on_toggle)
-        menu.addSeparator()
-        menu.addAction("Quit").triggered.connect(self._on_quit)
-        self._tray.setContextMenu(menu)
+    def set_color(self, color: str) -> None:
+        self.setStyleSheet(f"background: {color}; border-radius: {self._size // 2}px;")
 
-        self._refresh()
-        self._tray.show()
 
-        timer = QTimer()
-        timer.timeout.connect(self._poll)
-        timer.start(500)
+class ElidedLabel(QLabel):
+    """A single-line label that elides its text instead of forcing width."""
 
-        self._qt_app.exec()
-        self._tray.hide()
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        QLabel.setText(self, text)
 
-    def _handle_activate(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self._on_show()
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        self._full_text = text
+        self._apply_elide()
 
-    def _poll(self):
-        with self._lock:
-            if not self._dirty:
-                return
-            self._dirty = False
-        self._refresh()
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._apply_elide()
 
-    def _refresh(self):
-        with self._lock:
-            alive   = self._alive
-            working = self._working
-            title   = self._title
+    def _apply_elide(self) -> None:
+        width = max(0, self.width())
+        elided = self.fontMetrics().elidedText(
+            self._full_text, Qt.TextElideMode.ElideRight, width
+        )
+        QLabel.setText(self, elided)
 
-        if not alive:
-            color = QColor(COLOR_STOP)
-        elif working:
-            color = QColor(COLOR_WORK)
+
+class _ConnectionTester(QObject):
+    """Runs the reachability check off the GUI thread."""
+
+    finished = pyqtSignal(bool, str)
+
+    def test(self, url: str) -> None:
+        threading.Thread(target=self._run, args=(url,), daemon=True).start()
+
+    def _run(self, url: str) -> None:
+        try:
+            response = httpx.get(url, timeout=6.0, follow_redirects=True)
+            code = response.status_code
+            if code < 400:
+                message = f"Server reachable (HTTP {code})."
+            elif code in (401, 403):
+                message = f"Server reachable (HTTP {code}); credentials not checked."
+            else:
+                message = f"Server reachable (HTTP {code}) — check the URL path."
+            self.finished.emit(True, message)
+        except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            self.finished.emit(False, f"Could not reach server: {_shorten(detail, 120)}")
+
+
+class LogViewer(QDialog):
+    """Read-only, auto-refreshing view of the worker and manager logs."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Blurb logs")
+        self.resize(820, 560)
+        self.setModal(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        top.addWidget(QLabel("File"))
+        self.file_combo = QComboBox()
+        self._files = {
+            "Worker log": paths.log_file("worker.log"),
+            "Worker console": paths.log_file("worker-console.log"),
+            "Manager log": paths.log_file("blurb.log"),
+        }
+        self.file_combo.addItems(list(self._files))
+        self.file_combo.currentTextChanged.connect(self._load)
+        top.addWidget(self.file_combo)
+        top.addStretch(1)
+
+        folder_btn = QPushButton("Open folder")
+        folder_btn.setObjectName("Ghost")
+        folder_btn.clicked.connect(self._open_folder)
+        top.addWidget(folder_btn)
+
+        copy_btn = QPushButton("Copy diagnostics")
+        copy_btn.setObjectName("Secondary")
+        copy_btn.clicked.connect(self._copy_diagnostics)
+        top.addWidget(copy_btn)
+        layout.addLayout(top)
+
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        font = QFont("JetBrains Mono", 10)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.text.setFont(font)
+        layout.addWidget(self.text, 1)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._load)
+        self._timer.start()
+        self._last_source: tuple[str, int, int] | tuple[str, str] | None = None
+        self._load()
+
+    def _read_tail(self, path: Path) -> str:
+        """Read at most the last 256 KiB so the 1s refresh stays cheap."""
+        size = path.stat().st_size
+        tail_bytes = 256 * 1024
+        if size > tail_bytes:
+            with path.open("rb") as handle:
+                handle.seek(size - tail_bytes)
+                data = handle.read()
+            text = data.decode(errors="replace")
+            return "(… earlier lines omitted …)\n" + text
+        return path.read_text(errors="replace")
+
+    def _load(self, *_args) -> None:
+        path = self._files.get(self.file_combo.currentText())
+        if path is None:
+            return
+        try:
+            stat = path.stat()
+            source = (str(path), stat.st_mtime_ns, stat.st_size)
+        except FileNotFoundError:
+            source = (str(path), "missing")
+        except OSError as exc:
+            source = (str(path), f"error:{exc}")
+        if source == self._last_source:
+            return
+        self._last_source = source
+
+        if isinstance(source[1], str):
+            text = "(no log yet)" if source[1] == "missing" else f"(could not read log: {source[1]})"
         else:
-            color = QColor(COLOR_RUN)
+            try:
+                text = self._read_tail(path)
+            except OSError as exc:
+                text = f"(could not read log: {exc})"
 
-        pixmap = QPixmap(64, 64)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(color)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(4, 4, 56, 56)
-        painter.end()
+        lines = text.splitlines()
+        if len(lines) > 2000:
+            text = "(… earlier lines omitted …)\n" + "\n".join(lines[-2000:]) + "\n"
 
-        self._tray.setIcon(QIcon(pixmap))
-        self._tray.setToolTip(title)
-        self._toggle_act.setText("Stop Worker" if alive else "Start Worker")
+        scrollbar = self.text.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+        old_value = scrollbar.value()
+        if self.text.toPlainText() != text:
+            self.text.setPlainText(text)
+            if at_bottom:
+                scrollbar.setValue(scrollbar.maximum())
+            else:
+                scrollbar.setValue(min(old_value, scrollbar.maximum()))
+
+    def _open_folder(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths.cache_dir())))
+
+    def _copy_diagnostics(self) -> None:
+        status = _read_worker_status()
+        summary = [
+            "Blurb diagnostics",
+            f"config: {paths.env_file()}",
+            f"cache:  {paths.cache_dir()}",
+            f"status: {STATUS_FILE}",
+            "",
+            "Worker status:",
+            json.dumps(status, indent=2, default=str),
+        ]
+        QApplication.clipboard().setText("\n".join(summary))
 
 
 # ============================================================================
 # Manager
 # ============================================================================
 
-class BlurbManager:
-    def __init__(self, root: tk.Tk):
-        self.root        = root
-        self.worker_pid: int | None        = None
-        self._tray_thread: _QtTrayThread | None = None
-        self._web_url    = _read_env_var("WEB_URL")
-        self._api_key    = _read_env_var("BLURB_API_KEY")
-        hb_interval      = int(_read_env_var("HEARTBEAT_INTERVAL") or 60)
-        self._heartbeat_stale_after = hb_interval * 3
+class BlurbManager(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self._worker_proc: subprocess.Popen | None = None
+        self._stopping_proc: subprocess.Popen | None = None
+        self._start_error: str | None = None
+        self._restarting_until = 0.0
+        self._pending_start = False
+        self._tick = 0
+        self._dirty = False
+        self._loading = True
         self._key_visible = False
+        self._tested_url: str | None = None
+        self._recent_signature = ""
+        self._recent_time_labels: list[tuple[QLabel, float]] = []
+        self._tray_icon_key = ""
+        self._log_dialog: LogViewer | None = None
+        self._save_flash_timer = QTimer(self)
+        self._save_flash_timer.setSingleShot(True)
+        self._save_flash_timer.timeout.connect(lambda: self.save_state_lbl.setText(""))
+        self._auto_quit_timer = QTimer(self)
+        self._auto_quit_timer.setSingleShot(True)
+        self._auto_quit_timer.timeout.connect(self._quit_app)
 
-        self.scale = _detect_ui_scale()
-        self.pad   = {k: self._px(v) for k, v in _BASE_PAD.items()}
+        self._settings = QSettings("Blurb", "Blurb")
+        self._web_url = _read_env_var("WEB_URL")
+        self._api_key = _read_env_var("BLURB_API_KEY")
+        self._auto_start = _read_env_bool("BLURB_AUTO_START_WORKER", True)
+        self._quit_when_idle = _read_env_bool("BLURB_QUIT_WHEN_IDLE", False)
+        self._worker_started = False
+        self._auto_quit_scheduled = False
+        self._quitting = False
+        hb_interval_raw = _read_env_var("HEARTBEAT_INTERVAL") or "60"
+        try:
+            hb_interval = int(hb_interval_raw)
+        except ValueError:
+            hb_interval = 60
+        self._heartbeat_stale_after = max(30, hb_interval) * 3
+
+        self._tester = _ConnectionTester(self)
+        self._tester.finished.connect(self._on_test_finished)
 
         self._setup_window()
         self._build_ui()
+        self._setup_shortcuts()
+        self._setup_tray()
+        self._load_settings_form()
 
         if self._configured():
-            self._start_worker()
+            if self._auto_start:
+                self._start_worker()
         else:
             self._show_settings()
-        self._schedule_poll()
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(POLL_MS)
+        self._poll_timer.timeout.connect(self._on_tick)
+        self._poll_timer.start()
+        self._on_tick()
+
+    # ------------------------------------------------------------------ setup
 
     def _configured(self) -> bool:
         return bool(self._web_url and self._api_key)
 
-    def _px(self, n: int) -> int:
-        """Scale a literal pixel value to match Tk's detected display scale."""
-        return round(n * self.scale)
+    def _setup_window(self) -> None:
+        self.setWindowTitle("Blurb")
+        self.setWindowIcon(QIcon(str(paths.resource_path("blurb.png"))))
+        self.setMinimumSize(400, 480)
+        geometry = self._settings.value("window/geometry")
+        restored = False
+        if geometry is not None:
+            restored = self.restoreGeometry(geometry)
+        if not restored:
+            self.resize(460, 580)
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                self.move(
+                    area.center().x() - self.width() // 2,
+                    area.center().y() - self.height() // 2,
+                )
 
-    # ------------------------------------------------------------------ setup
+    def _build_ui(self) -> None:
+        root = QWidget()
+        root.setObjectName("Root")
+        self.setCentralWidget(root)
 
-    def _setup_window(self):
-        # Override Tk's own (mm-based, often desktop-scale-blind) DPI guess so
-        # point-sized fonts render at the same scale as our pixel geometry.
-        self.root.tk.call('tk', 'scaling', (96 / 72) * self.scale)
-        self.root.title("Blurb")
-        self.root.geometry(f"{self._px(320)}x{self._px(320)}")
-        self.root.minsize(self._px(260), self._px(260))
-        self.root.resizable(True, True)
-        self.root.configure(bg=COLOR_BG)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.stack = QStackedWidget()
+        outer.addWidget(self.stack)
+        self.stack.addWidget(self._build_dashboard())
+        self.stack.addWidget(self._build_settings())
+
+    def _setup_shortcuts(self) -> None:
+        QShortcut(QKeySequence("Ctrl+Q"), self, activated=self._quit_app)
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=self._show_logs)
+        QShortcut(QKeySequence("Ctrl+,"), self, activated=self._show_settings)
+        QShortcut(QKeySequence("Esc"), self, activated=self._escape)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_settings)
+
+    def _escape(self) -> None:
+        if self.stack.currentIndex() == 1 and self._configured():
+            self._show_dashboard()
+
+    # -------------------------------------------------------------- dashboard
+
+    def _build_dashboard(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        # Header
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        logo = QLabel()
+        pixmap = QPixmap(str(paths.resource_path("blurb.png")))
+        if not pixmap.isNull():
+            logo.setPixmap(pixmap.scaled(
+                30, 30,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        logo.setFixedSize(30, 30)
+        header.addWidget(logo)
+
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        title = QLabel("Blurb")
+        title.setObjectName("H1")
+        subtitle = QLabel("Transcription worker")
+        subtitle.setObjectName("Muted")
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        header.addLayout(titles)
+        header.addStretch(1)
+
+        self.logs_button = QPushButton("Logs")
+        self.logs_button.setObjectName("Ghost")
+        self.logs_button.setToolTip("View worker logs (Ctrl+L)")
+        self.logs_button.clicked.connect(self._show_logs)
+        header.addWidget(self.logs_button)
+
+        settings_button = QToolButton()
+        settings_button.setText("⚙")
+        settings_button.setToolTip("Settings (Ctrl+,)")
+        settings_button.setFixedSize(32, 32)
+        settings_button.clicked.connect(self._show_settings)
+        header.addWidget(settings_button)
+        layout.addLayout(header)
+
+        # Status card
+        card = QFrame()
+        card.setObjectName("Card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(18, 16, 18, 16)
+        card_layout.setSpacing(10)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        self.status_dot = _Dot(12)
+        status_row.addWidget(self.status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.status_lbl = QLabel("Starting…")
+        self.status_lbl.setObjectName("Status")
+        status_row.addWidget(self.status_lbl)
+        status_row.addStretch(1)
+        self.site_lbl = QLabel("")
+        self.site_lbl.setObjectName("Subtle")
+        status_row.addWidget(self.site_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        card_layout.addLayout(status_row)
+
+        self.detail_lbl = QLabel("")
+        self.detail_lbl.setObjectName("Muted")
+        self.detail_lbl.setWordWrap(True)
+        self.detail_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        card_layout.addWidget(self.detail_lbl)
+
+        self.error_lbl = QLabel("")
+        self.error_lbl.setObjectName("ErrorText")
+        self.error_lbl.setWordWrap(True)
+        self.error_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.error_lbl.hide()
+        card_layout.addWidget(self.error_lbl)
+
+        self.error_hint_lbl = QLabel("")
+        self.error_hint_lbl.setObjectName("Muted")
+        self.error_hint_lbl.setWordWrap(True)
+        self.error_hint_lbl.hide()
+        card_layout.addWidget(self.error_hint_lbl)
+
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(10)
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setAccessibleName("Job progress")
+        progress_row.addWidget(self.progress, 1)
+        self.percent_lbl = QLabel("")
+        self.percent_lbl.setObjectName("Subtle")
+        self.percent_lbl.setMinimumWidth(38)
+        self.percent_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        progress_row.addWidget(self.percent_lbl)
+        self.progress_row_widget = QWidget()
+        self.progress_row_widget.setLayout(progress_row)
+        card_layout.addWidget(self.progress_row_widget)
+
+        conn_row = QHBoxLayout()
+        conn_row.setSpacing(7)
+        self.conn_dot = _Dot(8)
+        conn_row.addWidget(self.conn_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.conn_lbl = QLabel("")
+        self.conn_lbl.setObjectName("Subtle")
+        conn_row.addWidget(self.conn_lbl)
+        conn_row.addStretch(1)
+        self.next_lbl = QLabel("")
+        self.next_lbl.setObjectName("Subtle")
+        conn_row.addWidget(self.next_lbl)
+        card_layout.addLayout(conn_row)
+        layout.addWidget(card)
+
+        # Actions
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.primary_btn = QPushButton("Stop worker")
+        self.primary_btn.setObjectName("Danger")
+        self.primary_btn.clicked.connect(self._toggle_worker)
+        actions.addWidget(self.primary_btn)
+        self.logs_action = QPushButton("View logs")
+        self.logs_action.setObjectName("Secondary")
+        self.logs_action.clicked.connect(self._show_logs)
+        actions.addWidget(self.logs_action)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        # Cookie warning banner
+        self.warning = QFrame()
+        self.warning.setObjectName("Warning")
+        warning_layout = QHBoxLayout(self.warning)
+        warning_layout.setContentsMargins(12, 8, 8, 8)
+        warning_layout.setSpacing(8)
+        warning_icon = QLabel("⚠")
+        warning_icon.setStyleSheet(f"color: {COLOR_WARN}; font-size: 15px;")
+        warning_layout.addWidget(warning_icon)
+        self.warning_lbl = QLabel("")
+        self.warning_lbl.setWordWrap(True)
+        self.warning_lbl.setStyleSheet(f"color: {COLOR_WARN};")
+        warning_layout.addWidget(self.warning_lbl, 1)
+        fix_btn = QPushButton("Fix")
+        fix_btn.setObjectName("Ghost")
+        fix_btn.setStyleSheet(f"color: {COLOR_WARN};")
+        fix_btn.clicked.connect(self._show_settings)
+        warning_layout.addWidget(fix_btn)
+        self.warning.hide()
+        layout.addWidget(self.warning)
+
+        # Recent jobs
+        recent_card = QFrame()
+        recent_card.setObjectName("Card")
+        recent_layout = QVBoxLayout(recent_card)
+        recent_layout.setContentsMargins(18, 14, 18, 14)
+        recent_layout.setSpacing(8)
+        recent_title = QLabel("Recent")
+        recent_title.setObjectName("H2")
+        recent_layout.addWidget(recent_title)
+        self.recent_box = QVBoxLayout()
+        self.recent_box.setSpacing(6)
+        recent_layout.addLayout(self.recent_box)
+        layout.addWidget(recent_card)
+
+        layout.addStretch(1)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        self.server_lbl = QLabel("")
+        self.server_lbl.setObjectName("Subtle")
+        footer.addWidget(self.server_lbl)
+        footer.addStretch(1)
+        local_lbl = QLabel("Audio is processed locally")
+        local_lbl.setObjectName("Subtle")
+        footer.addWidget(local_lbl)
+        layout.addLayout(footer)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        return scroll
+
+    # --------------------------------------------------------------- settings
+
+    def _build_settings(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        self.back_button = QPushButton("← Dashboard")
+        self.back_button.setObjectName("Ghost")
+        self.back_button.clicked.connect(self._show_dashboard)
+        header.addWidget(self.back_button)
+        title = QLabel("Settings")
+        title.setObjectName("H1")
+        header.addWidget(title)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 6, 0)
+        content_layout.setSpacing(14)
+
+        # Onboarding text (hidden once configured)
+        self.onboarding = QWidget()
+        onboarding_layout = QVBoxLayout(self.onboarding)
+        onboarding_layout.setContentsMargins(0, 0, 0, 0)
+        onboarding_layout.setSpacing(4)
+        welcome = QLabel("Connect Blurb")
+        welcome.setObjectName("H2")
+        onboarding_layout.addWidget(welcome)
+        welcome_text = QLabel(
+            "Paste the server URL and API key from your Blurb server. "
+            "The worker will start once the connection is saved."
+        )
+        welcome_text.setObjectName("Muted")
+        welcome_text.setWordWrap(True)
+        onboarding_layout.addWidget(welcome_text)
+        content_layout.addWidget(self.onboarding)
+
+        # Connection card
+        conn_card, conn_layout = self._card("Connection")
+        conn_help = QLabel("Where this computer picks up transcription jobs.")
+        conn_help.setObjectName("Muted")
+        conn_help.setWordWrap(True)
+        conn_layout.addWidget(conn_help)
+
+        conn_layout.addWidget(self._field_label("Remote URL"))
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("https://palpal.app/api")
+        self.url_edit.setClearButtonEnabled(True)
+        self.url_edit.setAccessibleName("Remote URL")
+        conn_layout.addWidget(self.url_edit)
+
+        conn_layout.addWidget(self._field_label("API key"))
+        key_row = QHBoxLayout()
+        key_row.setSpacing(6)
+        self.key_edit = QLineEdit()
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_edit.setPlaceholderText("Shared API key")
+        self.key_edit.setAccessibleName("API key")
+        key_row.addWidget(self.key_edit, 1)
+        self.show_key_btn = QPushButton("Show")
+        self.show_key_btn.setObjectName("Secondary")
+        self.show_key_btn.setFixedWidth(58)
+        self.show_key_btn.clicked.connect(self._toggle_key_visibility)
+        key_row.addWidget(self.show_key_btn)
+        conn_layout.addLayout(key_row)
+
+        test_row = QHBoxLayout()
+        test_row.setSpacing(8)
+        self.test_btn = QPushButton("Test connection")
+        self.test_btn.setObjectName("Secondary")
+        self.test_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.test_btn.clicked.connect(self._test_connection)
+        test_row.addWidget(self.test_btn)
+        self.test_lbl = QLabel("")
+        self.test_lbl.setObjectName("Subtle")
+        self.test_lbl.setWordWrap(True)
+        test_row.addWidget(self.test_lbl, 1)
+        conn_layout.addLayout(test_row)
+        self.test_lbl.hide()
+        content_layout.addWidget(conn_card)
+
+        # Startup card
+        startup_card, startup_layout = self._card("Startup")
+        self.autostart_check = QCheckBox("Launch Blurb at login")
+        startup_layout.addWidget(self.autostart_check)
+        self.auto_worker_check = QCheckBox("Start the worker automatically")
+        startup_layout.addWidget(self.auto_worker_check)
+        self.quit_when_idle_check = QCheckBox("Quit when the queue is empty")
+        self.quit_when_idle_check.setToolTip(
+            "After any queued jobs finish, exit Blurb on the first empty poll "
+            "instead of waiting for new work. Network errors do not trigger this."
+        )
+        startup_layout.addWidget(self.quit_when_idle_check)
+        content_layout.addWidget(startup_card)
+
+        # Advanced card
+        adv_card, adv_layout = self._card("Advanced")
+        adv_help = QLabel(
+            "Cookies stay on this machine. They are only read while discovering "
+            "or downloading from YouTube/Patreon."
+        )
+        adv_help.setObjectName("Muted")
+        adv_help.setWordWrap(True)
+        adv_layout.addWidget(adv_help)
+
+        self.yt_cookie_edit, self.yt_cookie_status = self._cookie_row(
+            adv_layout, "YouTube cookies"
+        )
+        self.patreon_cookie_edit, self.patreon_cookie_status = self._cookie_row(
+            adv_layout, "Patreon cookies"
+        )
+
+        adv_layout.addWidget(self._field_label("Transcription"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(4)
+
+        model_label = QLabel("Model")
+        model_label.setObjectName("Subtle")
+        grid.addWidget(model_label, 0, 0, 1, 2)
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setAccessibleName("Whisper model")
+        self.model_combo.setToolTip("Faster-Whisper model name. Larger models are more accurate but slower.")
+        self.model_combo.addItems([
+            "distil-large-v3",
+            "large-v3",
+            "large-v3-turbo",
+            "medium",
+            "small",
+            "base",
+            "tiny",
+        ])
+        grid.addWidget(self.model_combo, 1, 0, 1, 2)
+
+        device_label = QLabel("Device")
+        device_label.setObjectName("Subtle")
+        grid.addWidget(device_label, 2, 0)
+
+        compute_label = QLabel("Compute type")
+        compute_label.setObjectName("Subtle")
+        grid.addWidget(compute_label, 2, 1)
+
+        self.device_combo = QComboBox()
+        self.device_combo.setAccessibleName("Whisper device")
+        self.device_combo.setToolTip("Auto uses CUDA when available, otherwise CPU.")
+        self.device_combo.addItems(["Auto", "CUDA", "CPU"])
+        grid.addWidget(self.device_combo, 3, 0)
+
+        self.compute_combo = QComboBox()
+        self.compute_combo.setAccessibleName("Whisper compute type")
+        self.compute_combo.setToolTip("Auto uses float16 on GPU and int8 on CPU.")
+        self.compute_combo.addItems(["Auto", "float16", "int8", "float32"])
+        grid.addWidget(self.compute_combo, 3, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        adv_layout.addLayout(grid)
+        content_layout.addWidget(adv_card)
+
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        # Footer
+        footer = QHBoxLayout()
+        footer.setSpacing(10)
+        self.settings_error_lbl = QLabel("")
+        self.settings_error_lbl.setObjectName("ErrorText")
+        self.settings_error_lbl.setWordWrap(True)
+        footer.addWidget(self.settings_error_lbl, 1)
+        self.save_state_lbl = QLabel("")
+        self.save_state_lbl.setObjectName("Subtle")
+        footer.addWidget(self.save_state_lbl)
+        open_config_btn = QPushButton("Config folder")
+        open_config_btn.setObjectName("Ghost")
+        open_config_btn.clicked.connect(self._open_config_folder)
+        footer.addWidget(open_config_btn)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("Primary")
+        self.save_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.save_btn.clicked.connect(self._save_settings)
+        footer.addWidget(self.save_btn)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"background: {COLOR_BORDER}; border: none;")
+        layout.addWidget(separator)
+        layout.addLayout(footer)
+
+        # Wire up dirty tracking
+        for line_edit in (
+            self.url_edit,
+            self.key_edit,
+            self.yt_cookie_edit,
+            self.patreon_cookie_edit,
+        ):
+            line_edit.textChanged.connect(self._on_setting_changed)
+        for combo in (self.model_combo, self.device_combo, self.compute_combo):
+            combo.currentTextChanged.connect(self._on_setting_changed)
+        for check in (self.autostart_check, self.auto_worker_check, self.quit_when_idle_check):
+            check.toggled.connect(self._on_setting_changed)
+
+        return page
+
+    def _card(self, title: str) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(9)
+        label = QLabel(title)
+        label.setObjectName("H2")
+        layout.addWidget(label)
+        return card, layout
+
+    @staticmethod
+    def _field_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("FieldLabel")
+        return label
+
+    def _cookie_row(self, parent_layout: QVBoxLayout, label_text: str):
+        parent_layout.addWidget(self._field_label(label_text))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        entry = QLineEdit()
+        entry.setPlaceholderText("~/cookies.txt")
+        entry.setAccessibleName(f"{label_text} file")
+        entry.setToolTip("Netscape-format cookies.txt. It stays on this machine.")
+        row.addWidget(entry, 1)
+        browse = QPushButton("Browse…")
+        browse.setObjectName("Secondary")
+        browse.setFixedWidth(82)
+        browse.clicked.connect(lambda: self._browse_cookie(entry))
+        row.addWidget(browse)
+        parent_layout.addLayout(row)
+        status = QLabel("")
+        status.setObjectName("Subtle")
+        status.setWordWrap(True)
+        parent_layout.addWidget(status)
+        return entry, status
+
+    def _browse_cookie(self, entry: QLineEdit) -> None:
+        start = entry.text().strip() or str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select cookies file",
+            start,
+            "Cookies files (*.txt);;All files (*)",
+        )
+        if path:
+            entry.setText(path)
+
+    # ----------------------------------------------------------- settings data
+
+    def _load_settings_form(self) -> None:
+        self._loading = True
+        self.url_edit.setText(_read_env_var("WEB_URL"))
+        self.key_edit.setText(_read_env_var("BLURB_API_KEY"))
+        self.yt_cookie_edit.setText(_read_env_var("YOUTUBE_COOKIES_FILE"))
+        self.patreon_cookie_edit.setText(_read_env_var("PATREON_COOKIES_FILE"))
+
+        model = _read_env_var("WHISPER_MODEL") or "distil-large-v3"
+        self.model_combo.setCurrentText(model)
+
+        device = (_read_env_var("WHISPER_DEVICE") or "auto").lower()
+        device_label = {"auto": "Auto", "cuda": "CUDA", "cpu": "CPU"}.get(device, "Auto")
+        self.device_combo.setCurrentText(device_label)
+
+        compute = (_read_env_var("WHISPER_COMPUTE_TYPE") or "auto").lower()
+        compute_label = {
+            "auto": "Auto",
+            "float16": "float16",
+            "int8": "int8",
+            "float32": "float32",
+        }.get(compute, "Auto")
+        self.compute_combo.setCurrentText(compute_label)
+
+        self.autostart_check.setChecked(_autostart_enabled())
+        self.auto_worker_check.setChecked(self._auto_start)
+        self.quit_when_idle_check.setChecked(self._quit_when_idle)
+        self._loading = False
+        self._dirty = False
+        self.save_btn.setEnabled(False)
+        self.save_state_lbl.setText("")
+        self.settings_error_lbl.setText("")
+        self.onboarding.setVisible(not self._configured())
+        self.back_button.setVisible(self._configured())
+        self.test_lbl.hide()
+        self._refresh_cookie_labels()
+
+    def _collect_settings(self) -> dict:
+        device = self.device_combo.currentText().lower()
+        if device == "auto":
+            device = "auto"
+        compute = self.compute_combo.currentText()
+        if compute.lower() == "auto":
+            compute = ""
+
+        def expanded_path(text: str) -> str:
+            text = text.strip()
+            return str(Path(text).expanduser().absolute()) if text else ""
+
+        return {
+            "WEB_URL": self.url_edit.text().strip().rstrip("/"),
+            "BLURB_API_KEY": self.key_edit.text().strip(),
+            "YOUTUBE_COOKIES_FILE": expanded_path(self.yt_cookie_edit.text()),
+            "PATREON_COOKIES_FILE": expanded_path(self.patreon_cookie_edit.text()),
+            "WHISPER_MODEL": self.model_combo.currentText().strip(),
+            "WHISPER_DEVICE": device,
+            "WHISPER_COMPUTE_TYPE": compute,
+            "BLURB_AUTO_START_WORKER": "true" if self.auto_worker_check.isChecked() else "false",
+            "BLURB_QUIT_WHEN_IDLE": "true" if self.quit_when_idle_check.isChecked() else "false",
+        }
+
+    def _on_setting_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        self._save_flash_timer.stop()
+        self._dirty = True
+        self.settings_error_lbl.setText("")
+        self.test_lbl.hide()
+        self.save_state_lbl.setText("Unsaved changes")
+        self.save_state_lbl.setStyleSheet(f"color: {COLOR_WARN};")
+        self.save_btn.setEnabled(bool(
+            self.url_edit.text().strip() and self.key_edit.text().strip()
+        ))
+
+    def _validate_url(self) -> str | None:
+        url = self.url_edit.text().strip()
+        if not url:
+            return "Enter the remote URL first."
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return "The remote URL must start with http:// or https:// and include a host."
+        return None
+
+    def _validate_settings(self) -> str | None:
+        url_error = self._validate_url()
+        if url_error:
+            return url_error
+        if not self.key_edit.text().strip():
+            return "Both the remote URL and API key are required."
+        return None
+
+    def _save_settings(self) -> None:
+        if self.stack.currentIndex() != 1:
+            return
+        error = self._validate_settings()
+        if error:
+            self.settings_error_lbl.setText(error)
+            return
+
+        updates = self._collect_settings()
         try:
-            icon = tk.PhotoImage(file=str(paths.resource_path("blurb.png")))
-            self.root.iconphoto(True, icon)
-        except Exception:
-            pass
+            _set_autostart(self.autostart_check.isChecked())
+        except OSError as exc:
+            self.settings_error_lbl.setText(f"Could not update autostart: {exc}")
+            return
 
-    def _build_ui(self):
-        self.dashboard_frame = self._build_dashboard()
-        self.settings_frame  = self._build_settings()
-        self._refresh_static_labels()
-        self.dashboard_frame.pack(fill=tk.BOTH, expand=True)
+        try:
+            _write_env_vars(updates)
+        except OSError as exc:
+            self.settings_error_lbl.setText(f"Could not save settings: {exc}")
+            return
 
-    def _build_dashboard(self) -> tk.Frame:
-        f = tk.Frame(self.root, bg=COLOR_BG)
+        was_configured = self._configured()
+        was_alive = self._is_worker_alive()
+        was_auto_start = self._auto_start
+        self._web_url = updates["WEB_URL"]
+        self._api_key = updates["BLURB_API_KEY"]
+        self._auto_start = updates["BLURB_AUTO_START_WORKER"] == "true"
+        self._quit_when_idle = updates["BLURB_QUIT_WHEN_IDLE"] == "true"
+        if self._auto_quit_timer.isActive():
+            self._auto_quit_timer.stop()
+            self._auto_quit_scheduled = False
+            if not was_alive:
+                self._clear_exit_reason()
 
-        top = tk.Frame(f, bg=COLOR_BG)
-        top.pack(fill=tk.X, **self.pad)
+        # Reload from .env so the form shows the normalized values (for
+        # example an expanded cookie path) and unsaved state is cleared.
+        self._load_settings_form()
+        self._key_visible = False
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.show_key_btn.setText("Show")
+        self._flash_saved("Saved")
 
-        self.dot = tk.Label(top, text="●", font=("Sans", 16), fg=COLOR_STOP, bg=COLOR_BG)
-        self.dot.pack(side=tk.LEFT)
+        if not was_configured:
+            self._show_dashboard()
 
-        self.status_lbl = tk.Label(top, text="Starting…", font=FONT_STATUS,
-                                   fg=COLOR_FG, bg=COLOR_BG)
-        self.status_lbl.pack(side=tk.LEFT, padx=(6, 0))
+        if was_alive:
+            if was_auto_start and not self._auto_start:
+                # Turning auto-start off is also an explicit request to stop.
+                self._stop_worker()
+            else:
+                self._restart_worker()
+                self._flash_saved("Saved — restarting…", 4000)
+        elif self._auto_start:
+            self._start_worker()
 
-        gear = tk.Button(top, text="⚙ Settings", font=FONT_SMALL,
-                         fg=COLOR_MUTED, bg=COLOR_BG, relief=tk.FLAT, bd=0,
-                         cursor="hand2", activebackground=COLOR_BG,
-                         activeforeground=COLOR_FG, command=self._show_settings)
-        gear.pack(side=tk.RIGHT)
+    def _flash_saved(self, text: str, timeout: int = 2500) -> None:
+        self.save_state_lbl.setText(text)
+        self.save_state_lbl.setStyleSheet(f"color: {COLOR_RUN};")
+        self._save_flash_timer.start(timeout)
 
-        card = tk.Frame(f, bg=COLOR_CARD, bd=0)
-        card.pack(fill=tk.X, padx=14, pady=(0, 8))
+    def _toggle_key_visibility(self) -> None:
+        self._key_visible = not self._key_visible
+        self.key_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if self._key_visible else QLineEdit.EchoMode.Password
+        )
+        self.show_key_btn.setText("Hide" if self._key_visible else "Show")
 
-        self.job_lbl = tk.Label(card, text="Current job:  —",
-                                anchor="w", font=FONT_LABEL,
-                                fg=COLOR_FG, bg=COLOR_CARD)
-        self.job_lbl.pack(fill=tk.X, padx=10, pady=(6, 2))
+    def _test_connection(self) -> None:
+        error = self._validate_url()
+        if error:
+            self.test_lbl.setText(error)
+            self.test_lbl.setStyleSheet(f"color: {COLOR_STOP};")
+            self.test_lbl.show()
+            return
+        self.test_btn.setEnabled(False)
+        self.test_btn.setText("Testing…")
+        self.test_lbl.setText("Checking server reachability…")
+        self.test_lbl.setStyleSheet(f"color: {COLOR_MUTED};")
+        self.test_lbl.show()
+        self._tested_url = self.url_edit.text().strip().rstrip("/")
+        self._tester.test(self._tested_url)
 
-        self.conn_lbl = tk.Label(card, text="", anchor="w", font=FONT_LABEL,
-                                 fg=COLOR_MUTED, bg=COLOR_CARD)
-        self.conn_lbl.pack(fill=tk.X, padx=10, pady=2)
+    def _on_test_finished(self, ok: bool, message: str) -> None:
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("Test connection")
+        current = self.url_edit.text().strip().rstrip("/")
+        if self._tested_url is not None and current != self._tested_url:
+            return
+        self.test_lbl.setText(message)
+        self.test_lbl.setStyleSheet(f"color: {COLOR_RUN if ok else COLOR_STOP};")
+        self.test_lbl.show()
 
-        self.url_lbl = tk.Label(card, text="", anchor="w", font=FONT_LABEL,
-                                fg=COLOR_MUTED, bg=COLOR_CARD)
-        self.url_lbl.pack(fill=tk.X, padx=10, pady=(2, 2))
-
-        self.yt_cookie_lbl = tk.Label(card, text="", anchor="w", font=FONT_SMALL,
-                                      fg=COLOR_MUTED, bg=COLOR_CARD)
-        self.yt_cookie_lbl.pack(fill=tk.X, padx=10, pady=1)
-
-        self.patreon_cookie_lbl = tk.Label(card, text="", anchor="w", font=FONT_SMALL,
-                                           fg=COLOR_MUTED, bg=COLOR_CARD)
-        self.patreon_cookie_lbl.pack(fill=tk.X, padx=10, pady=(1, 6))
-
-        self.btn = tk.Button(f, text="Stop", width=12,
-                             font=("Sans", 10, "bold"),
-                             fg=COLOR_BTN_FG, bg=COLOR_BTN_STOP,
-                             relief=tk.FLAT, cursor="hand2",
-                             command=self._toggle_worker)
-        self.btn.pack(pady=(0, 10))
-
-        return f
-
-    def _build_settings(self) -> tk.Frame:
-        f = tk.Frame(self.root, bg=COLOR_BG)
-
-        top = tk.Frame(f, bg=COLOR_BG)
-        top.pack(fill=tk.X, **self.pad)
-
-        back = tk.Button(top, text="← Back", font=FONT_LABEL,
-                         fg=COLOR_MUTED, bg=COLOR_BG, relief=tk.FLAT, bd=0,
-                         cursor="hand2", activebackground=COLOR_BG,
-                         activeforeground=COLOR_FG, command=self._show_dashboard)
-        back.pack(side=tk.LEFT)
-
-        tk.Label(top, text="Settings", font=FONT_STATUS, fg=COLOR_FG,
-                bg=COLOR_BG).pack(side=tk.LEFT, padx=(10, 0))
-
-        body = tk.Frame(f, bg=COLOR_BG)
-        body.pack(fill=tk.BOTH, expand=True, padx=14)
-
-        tk.Label(body, text="Remote URL", anchor="w", font=FONT_LABEL,
-                fg=COLOR_MUTED, bg=COLOR_BG).pack(fill=tk.X, pady=(4, 0))
-        self.url_var = tk.StringVar()
-        url_entry = tk.Entry(body, textvariable=self.url_var, font=FONT_LABEL,
-                             bg=COLOR_CARD, fg=COLOR_FG, insertbackground=COLOR_FG,
-                             relief=tk.FLAT)
-        url_entry.pack(fill=tk.X, ipady=self._px(4), pady=(2, 8))
-
-        tk.Label(body, text="API Key", anchor="w", font=FONT_LABEL,
-                fg=COLOR_MUTED, bg=COLOR_BG).pack(fill=tk.X)
-        key_row = tk.Frame(body, bg=COLOR_BG)
-        key_row.pack(fill=tk.X, pady=(2, 4))
-        self.key_var = tk.StringVar()
-        self.key_entry = tk.Entry(key_row, textvariable=self.key_var, font=FONT_LABEL,
-                                  show="•", bg=COLOR_CARD, fg=COLOR_FG,
-                                  insertbackground=COLOR_FG, relief=tk.FLAT)
-        self.key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=self._px(4))
-        self.show_btn = tk.Button(key_row, text="Show", font=FONT_SMALL, width=4,
-                                  fg=COLOR_BTN_FG, bg=COLOR_CARD, relief=tk.FLAT,
-                                  cursor="hand2", command=self._toggle_key_visibility)
-        self.show_btn.pack(side=tk.LEFT, padx=(4, 0))
-
-        self.autostart_var = tk.BooleanVar(value=_autostart_enabled())
-        tk.Checkbutton(
-            body, text="Launch at login", variable=self.autostart_var,
-            font=FONT_LABEL, fg=COLOR_FG, bg=COLOR_BG,
-            activebackground=COLOR_BG, activeforeground=COLOR_FG,
-            selectcolor=COLOR_CARD, anchor="w", bd=0,
-            highlightthickness=0, cursor="hand2",
-        ).pack(fill=tk.X, pady=(2, 2))
-
-        self.settings_error_lbl = tk.Label(body, text="", anchor="w", font=FONT_SMALL,
-                                           fg=COLOR_STOP, bg=COLOR_BG,
-                                           wraplength=self._px(280), justify=tk.LEFT)
-        self.settings_error_lbl.pack(fill=tk.X, pady=(2, 4))
-
-        save_btn = tk.Button(body, text="Save", font=("Sans", 10, "bold"),
-                             fg=COLOR_BTN_FG, bg=COLOR_BTN_START, relief=tk.FLAT,
-                             cursor="hand2", command=self._save_settings)
-        save_btn.pack(pady=(4, 10))
-
-        return f
-
-    def _refresh_static_labels(self):
-        display_url = self._web_url or "not configured"
-        if len(display_url) > 32:
-            display_url = display_url[:29] + "…"
-        self.url_lbl.config(text=f"Remote:  {display_url}")
+    def _open_config_folder(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths.config_dir())))
 
     # ---------------------------------------------------------------- panels
 
-    def _show_settings(self):
-        self.url_var.set(self._web_url)
-        self.key_var.set(self._api_key)
-        self.autostart_var.set(_autostart_enabled())
+    def _show_settings(self) -> None:
+        self.onboarding.setVisible(not self._configured())
+        self.back_button.setVisible(self._configured())
         self._key_visible = False
-        self.key_entry.config(show="•")
-        self.show_btn.config(text="Show")
-        self.settings_error_lbl.config(text="")
-        self.dashboard_frame.pack_forget()
-        self.settings_frame.pack(fill=tk.BOTH, expand=True)
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.show_key_btn.setText("Show")
+        self.test_lbl.hide()
+        self.stack.setCurrentIndex(1)
+        self.url_edit.setFocus()
 
-    def _show_dashboard(self):
-        self.settings_frame.pack_forget()
-        self.dashboard_frame.pack(fill=tk.BOTH, expand=True)
-
-    def _toggle_key_visibility(self):
-        self._key_visible = not self._key_visible
-        self.key_entry.config(show="" if self._key_visible else "•")
-        self.show_btn.config(text="Hide" if self._key_visible else "Show")
-
-    def _save_settings(self):
-        url = self.url_var.get().strip()
-        key = self.key_var.get().strip()
-        if not url or not key:
-            self.settings_error_lbl.config(text="Both fields are required.")
+    def _show_dashboard(self) -> None:
+        if not self._configured():
             return
-
-        try:
-            _set_autostart(self.autostart_var.get())
-        except OSError as exc:
-            self.settings_error_lbl.config(text=f"Could not update autostart: {exc}")
-            return
-
-        _write_env_vars({"WEB_URL": url, "BLURB_API_KEY": key})
-        was_alive     = self._is_worker_alive()
-        self._web_url = url
-        self._api_key = key
-        self._refresh_static_labels()
-        self._show_dashboard()
-
-        if was_alive:
-            # New env vars only take effect for a freshly-started process.
-            self._stop_worker()
-            self.root.after(500, self._start_worker)
-        else:
-            self._start_worker()
+        self.stack.setCurrentIndex(0)
 
     # -------------------------------------------------------- process control
 
@@ -584,190 +1650,667 @@ class BlurbManager:
             return [sys.executable, "--worker"]
         return [str(VENV_PYTHON), str(BLURB_DIR / "web_worker.py")]
 
-    def _start_worker(self):
+    def _clear_exit_reason(self) -> None:
+        """Remove a stale one-shot exit marker before starting a fresh worker."""
+        try:
+            data = json.loads(STATUS_FILE.read_text())
+        except Exception:
+            return
+        if not isinstance(data, dict) or "exit_reason" not in data:
+            return
+        data.pop("exit_reason", None)
+        try:
+            STATUS_FILE.write_text(json.dumps(data))
+        except OSError:
+            pass
+
+    def _start_worker(self) -> None:
+        if self._stopping_proc is not None:
+            if self._stopping_proc.poll() is None:
+                QTimer.singleShot(200, self._start_worker)
+                return
+            self._stopping_proc = None
         if not self._configured() or self._is_worker_alive():
             return
 
-        # The worker keeps its own rotating worker.log. Capture anything else
-        # it writes to stdout/stderr (startup tracebacks, third-party noise) in
-        # a per-run console log without duplicating the normal log lines.
+        self._clear_exit_reason()
         try:
             log = open(paths.log_file("worker-console.log"), "w", buffering=1)
         except OSError:
             log = subprocess.DEVNULL
 
-        proc = subprocess.Popen(
-            self._worker_command(),
-            cwd=str(paths.config_dir() if paths.is_frozen() else BLURB_DIR),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-        if log is not subprocess.DEVNULL:
-            # The child owns its copy of the descriptor after fork.
-            log.close()
-        self.worker_pid = proc.pid
+        try:
+            proc = subprocess.Popen(
+                self._worker_command(),
+                cwd=str(paths.config_dir() if paths.is_frozen() else BLURB_DIR),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            self._start_error = f"Could not start the worker: {exc}"
+            proc = None
+        else:
+            self._start_error = None
+        finally:
+            if log is not subprocess.DEVNULL:
+                log.close()
 
-    def _stop_worker(self):
-        if self.worker_pid is not None:
+        self._worker_proc = proc
+        if proc is not None:
+            self._worker_started = True
+            self._auto_quit_scheduled = False
+            self._auto_quit_timer.stop()
+            self._restarting_until = max(self._restarting_until, time.time() + 1.5)
+
+    def _stop_worker(self) -> None:
+        proc = self._worker_proc
+        self._worker_proc = None
+        self._pending_start = False
+        if proc is None:
+            return
+        self._stopping_proc = proc
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
             try:
-                os.kill(self.worker_pid, signal.SIGTERM)
-            except ProcessLookupError:
+                proc.terminate()
+            except OSError:
                 pass
-            self.worker_pid = None
 
-    def _toggle_worker(self):
+    def _restart_worker(self) -> None:
+        self._restarting_until = time.time() + 8
+        self._stop_worker()
+        self._pending_start = True
+        QTimer.singleShot(250, self._start_when_stopped)
+
+    def _start_when_stopped(self, attempt: int = 0) -> None:
+        if not self._pending_start:
+            return
+        stopping = (
+            self._stopping_proc is not None
+            and self._stopping_proc.poll() is None
+        )
+        if self._is_worker_alive() or stopping:
+            if attempt < 30:
+                QTimer.singleShot(200, lambda: self._start_when_stopped(attempt + 1))
+            else:
+                self._pending_start = False
+                self._start_error = "The worker did not stop in time; try again."
+            return
+        self._stopping_proc = None
+        self._pending_start = False
+        self._start_worker()
+
+    def _toggle_worker(self) -> None:
+        if not self._configured():
+            self._show_settings()
+            return
         if self._is_worker_alive():
             self._stop_worker()
         else:
             self._start_worker()
 
     def _is_worker_alive(self) -> bool:
-        if self.worker_pid is None:
+        proc = self._worker_proc
+        if proc is None:
             return False
-        try:
-            os.kill(self.worker_pid, 0)
+        if proc.poll() is None:
             return True
-        except ProcessLookupError:
-            self.worker_pid = None
-            return False
+        self._worker_proc = None
+        return False
 
     # --------------------------------------------------------- system tray
 
-    def _on_close(self):
-        self.root.withdraw()
-        if self._tray_thread is None:
-            self._create_tray()
+    def _setup_tray(self) -> None:
+        self._tray: QSystemTrayIcon | None = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
 
-    def _create_tray(self):
-        self._tray_thread = _QtTrayThread(
-            alive=self._is_worker_alive(),
-            on_show=lambda: self.root.after(0, self._restore_window),
-            on_toggle=lambda: self.root.after(0, self._toggle_worker),
-            on_quit=lambda: self.root.after(0, self._quit_app),
-        )
-        self._tray_thread.start()
+        self._tray = QSystemTrayIcon(self)
+        self._tray_menu = QMenu()
+        self._tray_status_action = self._tray_menu.addAction("Blurb — stopped")
+        self._tray_status_action.setEnabled(False)
+        self._tray_menu.addSeparator()
+        self._tray_show_action = self._tray_menu.addAction("Show Blurb")
+        self._tray_show_action.triggered.connect(self._restore_window)
+        self._tray_toggle_action = self._tray_menu.addAction("Start worker")
+        self._tray_toggle_action.triggered.connect(self._toggle_worker)
+        self._tray_menu.addAction("View logs…").triggered.connect(self._show_logs)
+        self._tray_menu.addSeparator()
+        self._tray_menu.addAction("Quit").triggered.connect(self._quit_app)
 
-    def _restore_window(self):
-        self.root.deiconify()
-        self.root.lift()
-        if self._tray_thread is not None:
-            self._tray_thread.quit()
-            self._tray_thread = None
+        self._tray.setContextMenu(self._tray_menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.setIcon(self._tray_icon(COLOR_SUBTLE))
+        self._tray.setToolTip("Blurb — stopped")
+        self._tray.show()
 
-    def _quit_app(self):
-        self._stop_worker()
-        if self._tray_thread is not None:
-            self._tray_thread.quit()
-            self._tray_thread = None
-        self.root.destroy()
+    def _tray_icon(self, color: str) -> QIcon:
+        base = QPixmap(str(paths.resource_path("blurb.png")))
+        canvas = QPixmap(64, 64)
+        canvas.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if base.isNull():
+            painter.setBrush(QColor(COLOR_CARD))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(2, 2, 60, 60, 14, 14)
+            painter.setPen(QColor(COLOR_FG))
+            font = QFont("Sans", 26, QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.drawText(canvas.rect(), Qt.AlignmentFlag.AlignCenter, "B")
+        else:
+            scaled = base.scaled(
+                64, 64,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = (64 - scaled.width()) // 2
+            y = (64 - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+
+        painter.setBrush(QColor(color))
+        painter.setPen(QPen(QColor(COLOR_BG), 2))
+        painter.drawEllipse(43, 43, 19, 19)
+        painter.end()
+        return QIcon(canvas)
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            if self.isVisible() and not self.isMinimized():
+                self.hide()
+            else:
+                self._restore_window()
+
+    def _restore_window(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _update_tray(self, alive: bool, title: str, color: str) -> None:
+        if self._tray is None:
+            return
+        key = f"{alive}:{color}"
+        if key != self._tray_icon_key:
+            self._tray_icon_key = key
+            self._tray.setIcon(self._tray_icon(color))
+        self._tray.setToolTip(title)
+        self._tray_status_action.setText(title)
+        if self._auto_quit_scheduled:
+            self._tray_toggle_action.setText("Exiting…")
+            self._tray_toggle_action.setEnabled(False)
+        elif self._pending_start:
+            self._tray_toggle_action.setText("Restarting…")
+            self._tray_toggle_action.setEnabled(False)
+        elif not self._configured():
+            self._tray_toggle_action.setText("Set up Blurb")
+            self._tray_toggle_action.setEnabled(True)
+        else:
+            self._tray_toggle_action.setText("Stop worker" if alive else "Start worker")
+            self._tray_toggle_action.setEnabled(True)
 
     # -------------------------------------------------------------- polling
 
-    def _schedule_poll(self):
-        threading.Thread(target=self._fetch_and_update, daemon=True).start()
+    def _on_tick(self) -> None:
+        self._tick += 1
+        alive = self._is_worker_alive()
+        # Keep showing recent history even when the worker is stopped.
+        status = _read_worker_status()
+        self._maybe_quit_after_empty_queue(alive, status)
+        self._apply_status(alive, status)
+        if self._tick % 5 == 0:
+            self._refresh_cookie_labels()
+        recent = status.get("recent_jobs")
+        if not isinstance(recent, list):
+            recent = []
+        self._update_recent(recent)
 
-    def _fetch_and_update(self):
-        alive         = self._is_worker_alive()
-        status        = _read_worker_status() if alive else {}
-        yt_status     = _cookie_status("YOUTUBE_COOKIES_FILE")
-        patreon_status = _cookie_status("PATREON_COOKIES_FILE")
-        self.root.after(0, lambda: self._apply_and_reschedule(alive, status, yt_status, patreon_status))
-
-    def _apply_and_reschedule(self, alive, status, yt_status, patreon_status):
-        self._update_ui(alive, status)
-        self._update_tray(alive, status)
-        self._update_cookie_labels(yt_status, patreon_status)
-        self.root.after(POLL_MS, self._schedule_poll)
-
-    def _update_cookie_labels(self, yt_status: dict, patreon_status: dict):
-        text, color = _format_cookie_status("YouTube", yt_status)
-        self.yt_cookie_lbl.config(text=text, fg=color)
-        text, color = _format_cookie_status("Patreon", patreon_status)
-        self.patreon_cookie_lbl.config(text=text, fg=color)
-
-    def _update_tray(self, alive: bool, status: dict):
-        if self._tray_thread is None:
+    def _maybe_quit_after_empty_queue(self, alive: bool, status: dict) -> None:
+        if (
+            self._auto_quit_scheduled
+            or not self._quit_when_idle
+            or not self._worker_started
+            or alive
+            or self._pending_start
+            or status.get("exit_reason") != "empty_queue"
+        ):
             return
-        state   = status.get("state", "")
-        working = state in ("discover", "process")
-        if alive and working:
-            title = f"Blurb — {_STATE_LABELS.get(state, state.title())}"
-        elif alive and state == "error":
-            title = "Blurb — error"
-        elif alive:
-            title = "Blurb — running"
-        else:
-            title = "Blurb — stopped"
-        self._tray_thread.set_state(alive, working, title)
-
-    def _connection_text_and_color(self, hb_at, hb_ok) -> tuple[str, str]:
-        if hb_at is None:
-            return "Connecting…", COLOR_MUTED
-        stale = (time.time() - hb_at) > self._heartbeat_stale_after
-        if hb_ok and not stale:
-            return "Connected", COLOR_RUN
-        return "Connection issue", COLOR_STOP
-
-    def _update_ui(self, alive: bool, status: dict):
-        state = status.get("state", "")
-        job_id = status.get("job_id")
-        error  = status.get("error")
-        site   = status.get("site")
-        working = state in ("discover", "process")
-
-        if not alive:
-            self.dot.config(fg=COLOR_STOP)
-            self.status_lbl.config(text="Stopped")
-            self.btn.config(text="Start", bg=COLOR_BTN_START)
-            self.job_lbl.config(text="Current job:  —")
-            self.conn_lbl.config(text="")
-        elif working:
-            label = _STATE_LABELS.get(state, state.title())
-            self.dot.config(fg=COLOR_WORK)
-            self.status_lbl.config(text=label)
-            self.btn.config(text="Stop", bg=COLOR_BTN_STOP)
-            stage = status.get("stage") or ""
-            progress = status.get("progress") or {}
-            pct = progress.get("percent") if isinstance(progress, dict) else None
-            if pct is not None:
-                detail = f"{stage.title() or label}:  {pct:.0f}%"
-            elif stage:
-                detail = f"{stage.title()}:  {site or job_id or '—'}"
-            else:
-                detail = f"{label}:  {site or job_id or '—'}"
-            self.job_lbl.config(text=detail[:40])
-        elif state == "error":
-            self.dot.config(fg=COLOR_STOP)
-            self.status_lbl.config(text="Error")
-            self.btn.config(text="Stop", bg=COLOR_BTN_STOP)
-            self.job_lbl.config(text=f"Error:  {(error or 'unknown')[:28]}")
-        else:
-            # polling / starting / unknown
-            self.dot.config(fg=COLOR_RUN)
-            self.status_lbl.config(text="Polling" if state == "polling" else "Starting…")
-            self.btn.config(text="Stop", bg=COLOR_BTN_STOP)
-            next_poll_at = status.get("next_poll_at")
-            if state == "polling" and next_poll_at:
-                next_str = datetime.fromtimestamp(next_poll_at).strftime("%H:%M:%S")
-                self.job_lbl.config(text=f"Next poll:  {next_str}")
-            else:
-                self.job_lbl.config(text="Current job:  idle")
-
-        if alive:
-            text, color = self._connection_text_and_color(
-                status.get("last_heartbeat_at"), status.get("last_heartbeat_ok")
+        self._auto_quit_scheduled = True
+        if self._tray is not None:
+            self._tray.showMessage(
+                "No jobs available",
+                "The queue is empty, so Blurb is exiting.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
             )
-            self.conn_lbl.config(text=text, fg=color)
-        else:
-            self.conn_lbl.config(text="")
+        self._auto_quit_timer.start(1500)
+
+    def _apply_status(self, alive: bool, status: dict) -> None:
+        state = str(status.get("state") or "")
+        stage = str(status.get("stage") or "")
+        progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+        site = _shorten(str(status.get("site") or ""), 30)
+        error = str(status.get("error") or "")
+        restarting = time.time() < self._restarting_until and self._pending_start
+        working = alive and state in ("discover", "process")
+        exit_reason = ""
+        if self._worker_started or self._auto_quit_scheduled:
+            exit_reason = str(status.get("exit_reason") or "")
+
+        self.server_lbl.setText(
+            f"Server: {_shorten(_url_host(self._web_url), 28)}" if self._configured()
+            else "Server: not configured"
+        )
+
+        if self._start_error:
+            alive = False
+
+        # Reset state-specific widgets.
+        self.error_lbl.hide()
+        self.error_hint_lbl.hide()
+        self.progress_row_widget.hide()
+        self.site_lbl.setText("")
+        self.detail_lbl.setText("")
+        self.next_lbl.setText("")
+        self.conn_lbl.setText("")
+        self.conn_dot.hide()
 
         if not self._configured():
-            self.btn.config(state=tk.DISABLED, text="Not configured")
+            self.status_dot.set_color(COLOR_SUBTLE)
+            self.status_lbl.setText("Not configured")
+            self.detail_lbl.setText("Add a server URL and API key in Settings to get started.")
+            self.detail_lbl.show()
+            self._set_primary("Set up Blurb", "Primary", enabled=True)
+        elif restarting:
+            self.status_dot.set_color(COLOR_WARN)
+            self.status_lbl.setText("Restarting…")
+            self.detail_lbl.setText("Applying the new settings and bringing the worker back up.")
+            self._set_primary("Restarting…", "Secondary", enabled=False)
+        elif not alive:
+            if self._start_error:
+                self.status_dot.set_color(COLOR_STOP)
+                self.status_lbl.setText("Could not start")
+                self.error_lbl.setText(self._start_error)
+                self.error_lbl.show()
+                hint = _error_hint(self._start_error)
+                if hint:
+                    self.error_hint_lbl.setText(hint)
+                    self.error_hint_lbl.show()
+                self._set_primary("Start worker", "Primary", enabled=True)
+            elif exit_reason == "empty_queue":
+                self.status_dot.set_color(COLOR_SUBTLE)
+                self.status_lbl.setText("No jobs available")
+                if self._auto_quit_scheduled:
+                    self.detail_lbl.setText("The queue was empty. Blurb is exiting…")
+                    self._set_primary("Exiting…", "Secondary", enabled=False)
+                else:
+                    self.detail_lbl.setText("The queue was empty.")
+                    self._set_primary("Start worker", "Primary", enabled=True)
+                self.detail_lbl.show()
+            else:
+                self.status_dot.set_color(COLOR_SUBTLE)
+                self.status_lbl.setText("Stopped")
+                self.detail_lbl.setText("The worker is not running.")
+                self.detail_lbl.show()
+                self._set_primary("Start worker", "Primary", enabled=True)
+        elif error or state == "error":
+            self.status_dot.set_color(COLOR_STOP)
+            self.status_lbl.setText("Error")
+            if site:
+                self.site_lbl.setText(site)
+            self.error_lbl.setText(error or "The worker reported an unknown error.")
+            self.error_lbl.show()
+            hint = _error_hint(error)
+            if hint:
+                self.error_hint_lbl.setText(hint)
+                self.error_hint_lbl.show()
+            self._set_primary("Stop worker", "Danger", enabled=True)
+        elif working:
+            title = _status_title(state, stage, progress)
+            self.status_dot.set_color(COLOR_WORK)
+            self.status_lbl.setText(title)
+            if site:
+                self.site_lbl.setText(site)
+
+            detail = str(progress.get("detail") or "").strip()
+            parts = [p for p in (detail,) if p]
+            started = status.get("job_started_at")
+            elapsed = _format_duration(time.time() - started) if isinstance(started, (int, float)) else ""
+            if elapsed:
+                parts.append(elapsed)
+            self.detail_lbl.setText(" · ".join(parts) if parts else "Working…")
+            self.detail_lbl.show()
+
+            pct = progress.get("percent")
+            if isinstance(pct, (int, float)):
+                value = max(0, min(100, int(round(pct))))
+                self.progress.setRange(0, 100)
+                self.progress.setValue(value)
+                self.percent_lbl.setText(f"{value}%")
+            else:
+                self.progress.setRange(0, 0)
+                self.percent_lbl.setText("…")
+            self.progress_row_widget.show()
+            self._set_primary("Stop worker", "Danger", enabled=True)
         else:
-            self.btn.config(state=tk.NORMAL)
+            # polling / starting / unknown
+            if state == "polling":
+                self.status_dot.set_color(COLOR_RUN)
+                self.status_lbl.setText("Waiting for jobs")
+                self.detail_lbl.setText("The worker is ready and checking the server for new work.")
+            elif state == "stopped":
+                self.status_dot.set_color(COLOR_SUBTLE)
+                self.status_lbl.setText("Stopping…")
+                self.detail_lbl.setText("The worker is shutting down.")
+            else:
+                self.status_dot.set_color(COLOR_WARN)
+                self.status_lbl.setText("Starting…")
+                self.detail_lbl.setText("Waiting for the worker to come online.")
+            self.detail_lbl.show()
+            self._set_primary("Stop worker", "Danger", enabled=True)
+
+        # Connection line
+        if alive and self._configured() and not restarting:
+            hb_at = status.get("last_heartbeat_at")
+            hb_ok = status.get("last_heartbeat_ok")
+            self.conn_dot.show()
+            if hb_at is None:
+                self.conn_dot.set_color(COLOR_WARN)
+                self.conn_lbl.setText("Connecting…")
+                self.conn_lbl.setStyleSheet(f"color: {COLOR_MUTED};")
+            else:
+                stale = (time.time() - hb_at) > self._heartbeat_stale_after
+                if hb_ok and not stale:
+                    self.conn_dot.set_color(COLOR_RUN)
+                    self.conn_lbl.setText(f"Connected · heartbeat {_relative_time(hb_at)}")
+                    self.conn_lbl.setStyleSheet(f"color: {COLOR_MUTED};")
+                else:
+                    self.conn_dot.set_color(COLOR_STOP)
+                    self.conn_lbl.setText("Connection issue")
+                    self.conn_lbl.setStyleSheet(f"color: {COLOR_STOP};")
+
+        if alive and state == "polling":
+            next_poll_at = status.get("next_poll_at")
+            if isinstance(next_poll_at, (int, float)):
+                remaining = next_poll_at - time.time()
+                if remaining > 0:
+                    self.next_lbl.setText(f"Next check in {_format_countdown(remaining)}")
+                else:
+                    self.next_lbl.setText("Checking now…")
+
+        self._update_window_title(
+            alive, state, stage, progress, error, restarting, exit_reason,
+        )
+        self._update_tray(
+            alive,
+            self.windowTitle(),
+            self._status_color(alive, state, working, error),
+        )
+
+    def _status_color(self, alive: bool, state: str, working: bool, error: str) -> str:
+        if not alive:
+            return COLOR_SUBTLE
+        if error or state == "error":
+            return COLOR_STOP
+        if working:
+            return COLOR_WORK
+        if state == "polling":
+            return COLOR_RUN
+        return COLOR_WARN
+
+    def _set_primary(self, text: str, style: str, enabled: bool) -> None:
+        self.primary_btn.setText(text)
+        self.primary_btn.setEnabled(enabled)
+        if self.primary_btn.objectName() != style:
+            self.primary_btn.setObjectName(style)
+            self.primary_btn.style().unpolish(self.primary_btn)
+            self.primary_btn.style().polish(self.primary_btn)
+
+    def _update_window_title(
+        self, alive: bool, state: str, stage: str, progress: dict, error: str,
+        restarting: bool = False, exit_reason: str = "",
+    ) -> None:
+        if restarting:
+            title = "Blurb — Restarting"
+        elif not self._configured():
+            title = "Blurb — Setup"
+        elif not alive:
+            if exit_reason == "empty_queue":
+                title = "Blurb — No jobs"
+            else:
+                title = "Blurb — Stopped"
+        elif error or state == "error":
+            title = "Blurb — Error"
+        elif state in ("discover", "process"):
+            label = _status_title(state, stage, progress)
+            pct = progress.get("percent")
+            if isinstance(pct, (int, float)):
+                title = f"Blurb — {label} {int(round(pct))}%"
+            else:
+                title = f"Blurb — {label}"
+        elif state == "polling":
+            title = "Blurb — Waiting for jobs"
+        elif state == "stopped":
+            title = "Blurb — Stopping"
+        else:
+            title = "Blurb — Starting"
+        if title != self.windowTitle():
+            self.setWindowTitle(title)
+
+    # --------------------------------------------------------------- recent
+
+    def _update_recent(self, jobs: list) -> None:
+        jobs = [job for job in jobs if isinstance(job, dict)]
+        try:
+            signature = json.dumps(jobs, sort_keys=True, default=str)
+        except Exception:
+            signature = str(jobs)
+        if signature != self._recent_signature:
+            self._recent_signature = signature
+            self._rebuild_recent(jobs)
+
+        for label, timestamp in self._recent_time_labels:
+            label.setText(_relative_time(timestamp))
+
+    def _rebuild_recent(self, jobs: list) -> None:
+        while self.recent_box.count():
+            item = self.recent_box.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._recent_time_labels = []
+
+        if not jobs:
+            empty = QLabel("No recent jobs yet. Completed work will show up here.")
+            empty.setObjectName("Muted")
+            empty.setWordWrap(True)
+            self.recent_box.addWidget(empty)
+            return
+
+        for job in jobs[:3]:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(9)
+
+            ok = bool(job.get("ok"))
+            icon = QLabel("✓" if ok else "✕")
+            icon.setFixedWidth(16)
+            icon.setStyleSheet(f"color: {COLOR_RUN if ok else COLOR_STOP}; font-weight: 600;")
+            row_layout.addWidget(icon)
+
+            kind = str(job.get("kind") or "")
+            site = str(job.get("site") or "")
+            label = str(job.get("label") or "")
+            if ok:
+                if kind == "discover":
+                    title = f"Discovered {site or 'source'}"
+                elif kind == "process":
+                    title = f"Transcribed {site or 'audio'}"
+                else:
+                    title = site or "Job"
+            else:
+                verb = "discover" if kind == "discover" else "transcribe"
+                title = f"Failed to {verb} {site or 'job'}"
+            if label and label not in title:
+                title = f"{title} · {label}"
+            title = _shorten(title, 52)
+
+            text = ElidedLabel(title)
+            text.setObjectName("Muted")
+            text.setToolTip(
+                "\n".join(filter(None, [
+                    f"Job: {job.get('job_id') or '—'}",
+                    f"Finished: {_relative_time(job.get('finished_at'))}",
+                    f"Error: {job.get('error')}" if job.get("error") else "",
+                ]))
+            )
+            row_layout.addWidget(text, 1)
+
+            finished_at = job.get("finished_at")
+            if not isinstance(finished_at, (int, float)):
+                finished_at = None
+            time_lbl = QLabel(_relative_time(finished_at))
+            time_lbl.setObjectName("Subtle")
+            time_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row_layout.addWidget(time_lbl)
+            if isinstance(finished_at, (int, float)):
+                self._recent_time_labels.append((time_lbl, finished_at))
+
+            self.recent_box.addWidget(row)
+
+    # -------------------------------------------------------------- cookies
+
+    def _refresh_cookie_labels(self) -> None:
+        yt = _cookie_status("YOUTUBE_COOKIES_FILE")
+        patreon = _cookie_status("PATREON_COOKIES_FILE")
+
+        yt_text, yt_color = _cookie_words(yt)
+        self.yt_cookie_status.setText(yt_text)
+        self.yt_cookie_status.setStyleSheet(f"color: {yt_color};")
+
+        patreon_text, patreon_color = _cookie_words(patreon)
+        self.patreon_cookie_status.setText(patreon_text)
+        self.patreon_cookie_status.setStyleSheet(f"color: {patreon_color};")
+
+        issues = [issue for issue in (
+            _cookie_issue("YouTube", yt),
+            _cookie_issue("Patreon", patreon),
+        ) if issue]
+        if issues:
+            self.warning_lbl.setText(" ".join(issues))
+            self.warning.show()
+        else:
+            self.warning.hide()
+
+    # ----------------------------------------------------------------- logs
+
+    def _show_logs(self) -> None:
+        if self._log_dialog is not None:
+            try:
+                self._log_dialog.raise_()
+                self._log_dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._log_dialog = None
+        dialog = LogViewer(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.destroyed.connect(lambda: setattr(self, "_log_dialog", None))
+        self._log_dialog = dialog
+        dialog.show()
+
+    # ------------------------------------------------------------ close/quit
+
+    def closeEvent(self, event) -> None:
+        self._settings.setValue("window/geometry", self.saveGeometry())
+        if self._tray is not None and self._tray.isVisible():
+            event.ignore()
+            self.hide()
+            if not self._settings.value("ui/close_hint_shown", False, type=bool):
+                self._settings.setValue("ui/close_hint_shown", True)
+                self._tray.showMessage(
+                    "Blurb is still running",
+                    "The worker keeps running in the system tray. "
+                    "Use the tray menu to reopen or quit.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5000,
+                )
+            return
+        self._quit_app()
+
+    def _quit_app(self) -> None:
+        if self._quitting:
+            return
+        self._quitting = True
+        self._auto_quit_timer.stop()
+        self._settings.setValue("window/geometry", self.saveGeometry())
+        self._stop_worker()
+        if self._tray is not None:
+            self._tray.hide()
+        QApplication.quit()
+
+
+def _dark_palette() -> QPalette:
+    """Dark defaults for native widgets and dialogs that QSS doesn't reach."""
+    palette = QPalette()
+    roles = {
+        QPalette.ColorRole.Window: COLOR_BG,
+        QPalette.ColorRole.WindowText: COLOR_FG,
+        QPalette.ColorRole.Base: COLOR_CARD_DARK,
+        QPalette.ColorRole.AlternateBase: COLOR_CARD,
+        QPalette.ColorRole.Text: COLOR_FG,
+        QPalette.ColorRole.Button: COLOR_CARD,
+        QPalette.ColorRole.ButtonText: COLOR_FG,
+        QPalette.ColorRole.BrightText: COLOR_STOP,
+        QPalette.ColorRole.Highlight: COLOR_ACCENT,
+        QPalette.ColorRole.HighlightedText: COLOR_BTN_FG,
+        QPalette.ColorRole.ToolTipBase: COLOR_CARD,
+        QPalette.ColorRole.ToolTipText: COLOR_FG,
+        QPalette.ColorRole.PlaceholderText: COLOR_SUBTLE,
+        QPalette.ColorRole.Mid: COLOR_BORDER,
+        QPalette.ColorRole.Dark: COLOR_BG,
+        QPalette.ColorRole.Light: COLOR_BORDER,
+    }
+    for role, color in roles.items():
+        palette.setColor(role, QColor(color))
+    return palette
+
+
+def run() -> None:
+    """Create the application and show the manager window."""
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setApplicationName("Blurb")
+    app.setApplicationDisplayName("Blurb")
+    app.setOrganizationName("Blurb")
+    app.setDesktopFileName("blurb")
+    app.setQuitOnLastWindowClosed(False)
+    app.setPalette(_dark_palette())
+    icon_path = str(paths.resource_path("blurb.png"))
+    if Path(icon_path).is_file():
+        app.setWindowIcon(QIcon(icon_path))
+
+    qss = _APP_QSS
+    check_icon = _ensure_check_icon()
+    if check_icon:
+        qss += f'\nQCheckBox::indicator:checked {{ image: url("{check_icon}"); }}\n'
+    arrow_icon = _ensure_arrow_icon()
+    if arrow_icon:
+        qss += (
+            f'\nQComboBox::down-arrow {{ image: url("{arrow_icon}"); '
+            'width: 10px; height: 6px; }\n'
+        )
+    app.setStyleSheet(qss)
+    manager = BlurbManager()
+    manager.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    BlurbManager(root)
-    root.mainloop()
+    run()

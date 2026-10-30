@@ -65,13 +65,9 @@ def _print_versions() -> None:
 
 
 def _run_gui() -> None:
-    import tkinter as tk
+    from blurb_manager import run
 
-    from blurb_manager import BlurbManager
-
-    root = tk.Tk()
-    BlurbManager(root)
-    root.mainloop()
+    run()
 
 
 def main() -> None:
