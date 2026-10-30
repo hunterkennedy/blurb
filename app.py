@@ -104,7 +104,7 @@ def main() -> None:
         return
 
     if args and args[0] in ("--version", "-V"):
-        print("Blurb 0.1.0")
+        print("Blurb 0.2.0")
         return
 
     _run_gui()

@@ -9,4 +9,4 @@ Terminal=false
 Categories=AudioVideo;
 Keywords=transcribe;whisper;audio;podcast;
 StartupWMClass=Blurb
-X-AppImage-Version=0.1.0
+X-AppImage-Version=0.2.0

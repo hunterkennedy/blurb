@@ -119,12 +119,16 @@ Cookies are only read during discover/download jobs and are sent only to YouTube
 ## Building AppImages
 
 ```bash
-./packaging/appimage/build-nvidia.sh
+./packaging/appimage/build-all.sh
 # -> dist/Blurb-nvidia-x86_64.AppImage
-
-./packaging/appimage/build-rocm.sh
 # -> dist/Blurb-rocm-x86_64.AppImage
+
+# Or build one backend:
+./packaging/appimage/build-nvidia.sh
+./packaging/appimage/build-rocm.sh
 ```
+
+`build-all.sh` runs both builds sequentially because they share the venv, download cache, PyInstaller work directory, and AppDir. It is one command, but the two images are still produced one after the other.
 
 The build runs PyInstaller, bundles FFmpeg, Node.js, and the selected CTranslate2 backend, then wraps everything with `appimagetool`.
 
