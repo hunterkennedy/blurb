@@ -1,13 +1,12 @@
 """
 Discovery scraping — runs entirely on blurb, using cookies that live only on
-this machine's local disk. Talks to YouTube (via yt-dlp) and Patreon (via its
-JSON:API) directly; conductor only ever receives the resulting entries, never
-the credentials used to get them.
+this machine's local disk. Talks to YouTube via yt-dlp and fetches RSS/Atom
+feeds directly; conductor only ever receives the resulting entries, never the
+credentials used to get them.
 
-RSS sources are different: there's no separate credential at all — any auth
-needed (e.g. a Patreon RSS feed's "?auth=..." token) is embedded directly in
-the feed URL, which conductor already stores and hands back to us verbatim,
-same as a YouTube channel URL. Nothing local to configure for it.
+RSS sources need no separate credential: any auth needed (e.g. a private
+Patreon audio feed's "?auth=..." token) is embedded directly in the feed URL,
+which conductor already stores and hands back to us verbatim.
 
 Entries are returned unfiltered (title_exclude, unavailable-title skipping,
 duration-based blacklisting) — conductor owns all of that business logic
@@ -38,10 +37,6 @@ import paths
 import test_mode
 
 logger = logging.getLogger(__name__)
-
-_PATREON_AUDIO_POST_TYPES = {"podcast", "audio_file"}
-_PATREON_API_URL = "https://www.patreon.com/api/posts"
-_PATREON_COLLECTION_RE = re.compile(r"patreon\.com/collection/(\d+)")
 
 _ITUNES_NS = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
 _RDF_NS = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}"
@@ -180,31 +175,13 @@ def yt_dlp_path() -> str:
 
 
 def cookie_file_for(site: str) -> str | None:
-    """Path to the local Netscape-format cookies.txt for a site, if configured."""
-    env_key = "YOUTUBE_COOKIES_FILE" if site == "youtube" else "PATREON_COOKIES_FILE"
-    path = os.environ.get(env_key, "").strip()
+    """Path to the local Netscape-format cookies.txt for YouTube, if configured."""
+    if site != "youtube":
+        return None
+    path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
     if path and os.path.isfile(path):
         return path
     return None
-
-
-def _read_patreon_session_cookie() -> str:
-    """Extract session_id from the local Patreon cookies.txt (Netscape format)."""
-    path = cookie_file_for("patreon")
-    if not path:
-        return ""
-    with open(path) as f:
-        cookies_txt = f.read()
-    for line in cookies_txt.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        if len(parts) < 7:
-            continue
-        if "patreon.com" in parts[0] and parts[5] == "session_id":
-            return parts[6]
-    return ""
 
 
 async def _run_yt_dlp_json(url: str, cookie_file: str | None, flat_playlist: bool, timeout: int) -> dict | list[dict]:
@@ -320,109 +297,9 @@ async def _fetch_channel_icon(source_url: str, cookie_file: str | None) -> dict 
         return None
 
 
-async def fetch_patreon_post_duration(video_id: str) -> float | None:
-    """
-    Probe a single Patreon post's duration via yt-dlp metadata — no audio is
-    downloaded. Used to backfill duration on episodes discovered before we
-    started capturing it at download time (see download_audio).
-    """
-    cookie_file = cookie_file_for("patreon")
-    url = f"https://www.patreon.com/posts/{video_id}"
-    info = await _run_yt_dlp_json(url, cookie_file, flat_playlist=False, timeout=60)
-    if not isinstance(info, dict):
-        return None
-    return info.get("duration")
-
-
-async def _fetch_patreon_campaign_id(url: str, session_cookie: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; palpal/1.0)"}
-    if session_cookie:
-        headers["Cookie"] = f"session_id={session_cookie}"
-
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-    resp.raise_for_status()
-    html = resp.text
-
-    m = re.search(r'"campaign"\s*:\s*\{\s*"data"\s*:\s*\{\s*"id"\s*:\s*"(\d+)"', html)
-    if m:
-        return m.group(1)
-    m = re.search(r'/campaign/(\d+)/', html)
-    if m:
-        return m.group(1)
-    m = re.search(r'"NavigationBar_(\d+)"', html)
-    if m:
-        return m.group(1)
-
-    raise RuntimeError(f"Could not extract campaign_id from Patreon page: {url}")
-
-
-async def discover_patreon_source(url: str) -> tuple[list[dict], None]:
-    """Scrape a Patreon collection/campaign via the JSON:API. No icon fetch for Patreon."""
-    session_cookie = _read_patreon_session_cookie()
-
-    collection_match = _PATREON_COLLECTION_RE.search(url)
-    collection_id = collection_match.group(1) if collection_match else None
-
-    campaign_id = await _fetch_patreon_campaign_id(url, session_cookie)
-    logger.info(f"Patreon source {url}: campaign_id={campaign_id}, collection_id={collection_id}")
-
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; palpal/1.0)"}
-    if session_cookie:
-        headers["Cookie"] = f"session_id={session_cookie}"
-
-    params: dict = {
-        "filter[campaign_id]": campaign_id,
-        "filter[contains_exclusive_posts]": "true",
-        "filter[is_draft]": "false",
-        "sort": "collection_order" if collection_id else "-published_at",
-        "fields[post]": "title,published_at,post_type",
-        "json-api-version": "1.0",
-        "page[count]": "50",
-    }
-    if collection_id:
-        params["filter[collection_id]"] = collection_id
-
-    entries: list[dict] = []
-    cursor: str | None = None
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        while True:
-            if cursor:
-                params["page[cursor]"] = cursor
-
-            resp = await client.get(_PATREON_API_URL, params=params, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-            for post in data.get("data", []):
-                post_id = post.get("id")
-                attrs = post.get("attributes", {})
-                post_type = attrs.get("post_type") or ""
-                if not post_id or post_type not in _PATREON_AUDIO_POST_TYPES:
-                    continue
-
-                published_at = attrs.get("published_at")  # ISO 8601 string
-                pub_date = published_at[:10] if published_at else None
-
-                entries.append({
-                    "video_id": post_id,
-                    "title": attrs.get("title") or "",
-                    "pub_date": pub_date,
-                    "duration": None,
-                })
-
-            cursor = data.get("meta", {}).get("pagination", {}).get("cursors", {}).get("next")
-            if not cursor:
-                break
-
-    logger.info(f"Patreon source {url}: {len(entries)} audio entries found")
-    return entries, None
-
-
 # --------------------------------------------------------------------------- #
-# RSS — generic podcast feeds, e.g. a Patreon RSS export or any other private #
-# feed URL with the auth baked into the query string.                        #
+# RSS — generic podcast feeds, e.g. a private Patreon audio export or any     #
+# other feed URL with the auth baked into the query string.                   #
 # --------------------------------------------------------------------------- #
 
 def _parse_itunes_duration(raw: str | None) -> float | None:
@@ -734,10 +611,12 @@ async def discover(site: str, url: str) -> dict:
     """Entry point for a 'discover' job. Returns the job result payload."""
     if test_mode.is_test_source(url):
         return test_mode.load_discovery(site, url)
-    if site == "patreon":
-        entries, icon = await discover_patreon_source(url)
-    elif site == "rss":
+    if site == "rss":
         entries, icon = await discover_rss_source(url)
-    else:
+    elif site == "youtube":
         entries, icon = await discover_youtube_source(url)
+    else:
+        raise RuntimeError(
+            f"Unsupported source site {site!r}; Patreon sources must use their RSS feed URL"
+        )
     return {"entries": entries, "icon": icon}

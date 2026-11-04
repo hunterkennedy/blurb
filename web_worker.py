@@ -3,13 +3,10 @@ Pull-worker for Blurb.
 
 Polls a remote service for jobs, does the work locally, and posts results
 back. Two job kinds:
-  'discover' — scrape a YouTube/Patreon/RSS source (YouTube/Patreon use local
-               cookies; RSS needs none — any auth is embedded in the feed URL)
-  'process'  — download audio (using local cookies for YouTube/Patreon, a
-               plain HTTP stream for RSS) + transcribe it
-             — or, with payload.duration_only=True, just probe a Patreon
-               post's duration via yt-dlp metadata (no download/transcribe),
-               used to backfill episodes processed before duration capture existed
+  'discover' — scrape a YouTube or RSS source (YouTube uses local cookies;
+               RSS needs none — any auth is embedded in the feed URL)
+  'process'  — download audio (using local cookies for YouTube, a plain HTTP
+               stream for RSS) + transcribe it
 
 Runs as a long-lived process managed by blurb_manager.py.
 
@@ -20,10 +17,9 @@ Required env vars (loaded from .env):
 Optional:
   POLL_INTERVAL           seconds to wait when no job is available (default: 5)
   YOUTUBE_COOKIES_FILE    path to a Netscape-format cookies.txt for YouTube
-  PATREON_COOKIES_FILE    path to a Netscape-format cookies.txt for Patreon
 
 Cookies never leave this machine — conductor only ever sends us a source URL
-or a video/post ID and receives back scraped entries or a transcript.
+or a video ID and receives back scraped entries or a transcript.
 """
 
 import asyncio
@@ -69,7 +65,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # httpx logs every request URL at INFO. RSS feed/enclosure URLs carry private
-# auth tokens (a Patreon feed's ?auth=.../u/<token>/...), so don't let those
+# auth tokens (a private feed's ?auth=.../u/<token>/...), so don't let those
 # reach the worker logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -412,7 +408,6 @@ def _health_snapshot() -> dict:
         "whisper_compute_type": os.getenv("WHISPER_COMPUTE_TYPE") or "auto",
         "cookies": {
             "youtube": _cookie_health("YOUTUBE_COOKIES_FILE"),
-            "patreon": _cookie_health("PATREON_COOKIES_FILE"),
         },
     }
     return _health_cache
@@ -461,21 +456,12 @@ def _handle_discover(payload: dict, job_id: str | None = None) -> dict:
 
 
 def _handle_process(payload: dict, job_id: str | None = None) -> dict:
-    import discovery
     import download
     import test_mode
     from transcribe import transcribe_audio  # deferred so the model isn't loaded until first needed
 
     site = payload["site"]
     video_id = payload["video_id"]
-
-    # Lightweight backfill mode: probe duration via yt-dlp metadata only, no
-    # download/transcribe. Used to fill in duration on episodes that were
-    # already processed before duration capture existed.
-    if payload.get("duration_only"):
-        _progress(job_id, "probing duration", None, "reading metadata", force=True)
-        duration = asyncio.run(discovery.fetch_patreon_post_duration(video_id))
-        return {"duration_seconds": duration}
 
     min_duration = payload.get("min_duration_seconds", 0)
 

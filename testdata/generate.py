@@ -97,7 +97,6 @@ def main() -> None:
     (FIXTURES_DIR / "transcripts").mkdir(parents=True, exist_ok=True)
 
     yt_default = _entries("yt", count=8, with_duration=True)
-    pat_default = _entries("pat", count=8, with_duration=False)
 
     _write("discovery_youtube_default.json", {"entries": yt_default, "icon": {
         "url": "https://example.com/fake-channel-icon.png",
@@ -110,14 +109,6 @@ def main() -> None:
         "icon": None,
     })
     _write("discovery_youtube_empty.json", {"entries": [], "icon": None})
-
-    _write("discovery_patreon_default.json", {"entries": pat_default, "icon": None})
-    _write("discovery_patreon_shrink.json", {"entries": pat_default[:-1], "icon": None})
-    _write("discovery_patreon_grow.json", {
-        "entries": pat_default + _entries("pat", count=9, with_duration=False)[-1:],
-        "icon": None,
-    })
-    _write("discovery_patreon_empty.json", {"entries": [], "icon": None})
 
     default_transcript = _make_transcript(word_offset=0, n_words=60, words_per_segment=15, pub_date=_date_str(0))
     _write("transcripts/default.json", default_transcript)

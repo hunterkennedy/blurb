@@ -1,7 +1,7 @@
 # Test mode
 
 Lets conductor exercise discover/process jobs against blurb without hitting
-real YouTube/Patreon or running yt-dlp/Whisper. Useful for testing conductor's
+real YouTube/RSS or running yt-dlp/Whisper. Useful for testing conductor's
 state machine — orphan detection, new-episode detection, download failure
 handling — against known, repeatable data.
 
@@ -11,14 +11,14 @@ JSON fixtures it reads.
 ## Discover jobs
 
 Point a source's `url` at `pal-test` (or `pal-test-<scenario>`) instead of a
-real channel/collection URL. `site` stays `youtube` or `patreon` as normal —
-that's what picks which fixture file loads.
+real channel URL. `site` stays `youtube` as normal — that's what picks which
+fixture file loads.
 
 | url | scenario | what you get |
 |---|---|---|
-| `pal-test` | `default` | 8 entries (`test-yt-01`..`08` / `test-pat-01`..`08`) |
+| `pal-test` | `default` | 8 entries (`test-yt-01`..`08`) |
 | `pal-test-shrink` | `shrink` | same 8 minus the last one — poll this after `default` to trigger orphan detection |
-| `pal-test-grow` | `grow` | the 8 plus a 9th (`test-yt-09` / `test-pat-09`) — poll this after `default` to trigger new-episode detection |
+| `pal-test-grow` | `grow` | the 8 plus a 9th (`test-yt-09`) — poll this after `default` to trigger new-episode detection |
 | `pal-test-empty` | `empty` | zero entries |
 
 Scenario ids are shared across variants on purpose (`shrink` and `grow` both

@@ -1,6 +1,6 @@
 """
-Audio download — runs on blurb, using cookies that live only on this
-machine's local disk. Conductor hands us a video/post ID and never sees the
+Audio download — runs on blurb, using YouTube cookies that live only on this
+machine's local disk. Conductor hands us a video ID and never sees the
 credentials used to fetch it.
 
 RSS episodes skip yt-dlp entirely: the feed's <enclosure> already points
@@ -55,7 +55,7 @@ _AUDIO_EXT_BY_CONTENT_TYPE = {
 def _safe_audio_stem(video_id: str) -> str:
     """Turn an episode ID into a safe filename stem.
 
-    RSS GUIDs are not guaranteed to look like YouTube/Patreon IDs: plenty of
+    RSS GUIDs are not guaranteed to look like YouTube IDs: plenty of
     feeds use a URL (or a slash-containing tag) as the guid. Using that
     verbatim as a filename either creates a nonexistent subdirectory or
     exceeds the filename limit, so sanitize it and append a short hash to keep
@@ -102,8 +102,8 @@ async def _download_rss_audio(
     if not enclosure_url:
         raise EpisodeUnavailableError(f"RSS item {video_id} no longer in feed")
 
-    # Don't log the full enclosure URL: feeds like Patreon's embed the same
-    # private token in the enclosure path that the feed URL carries in ?auth=.
+    # Don't log the full enclosure URL: some private feeds embed the same
+    # token in the enclosure path that the feed URL carries in ?auth=.
     logger.info(f"Downloading RSS audio for {video_id} from {urlparse(enclosure_url).hostname}")
 
     try:
@@ -171,7 +171,7 @@ async def download_audio(
     source_url: str | None = None, progress_cb=None,
 ) -> tuple[str, str | None, float | None]:
     """
-    Download audio for one episode into `workdir`. YouTube/Patreon go through
+    Download audio for one episode into `workdir`. YouTube goes through
     yt-dlp; RSS is a direct HTTP stream of the feed's enclosure (`source_url`
     is required in that case — the source's feed URL).
     Returns (file_path, publication_date_or_None, duration_seconds_or_None).
@@ -181,12 +181,13 @@ async def download_audio(
     """
     if site == "rss":
         return await _download_rss_audio(video_id, source_url, workdir, progress_cb=progress_cb)
+    if site != "youtube":
+        raise RuntimeError(
+            f"Unsupported download site {site!r}; Patreon sources must use their RSS feed URL"
+        )
 
     output_template = os.path.join(workdir, f"{video_id}.%(ext)s")
-    video_url = (
-        f"https://www.patreon.com/posts/{video_id}" if site == "patreon"
-        else f"https://youtube.com/watch?v={video_id}"
-    )
+    video_url = f"https://youtube.com/watch?v={video_id}"
 
     logger.info(f"Downloading audio for {site}/{video_id}")
 
@@ -210,7 +211,7 @@ async def download_audio(
     if cookie_file:
         cmd += ["--cookies", cookie_file]
 
-    if site != "patreon" and min_duration_seconds and min_duration_seconds > 0:
+    if min_duration_seconds and min_duration_seconds > 0:
         cmd += ["--match-filter", f"duration >= {min_duration_seconds}"]
 
     cmd.append(video_url)
@@ -262,7 +263,7 @@ async def download_audio(
 
     if proc.returncode != 0:
         logger.warning(f"yt-dlp stderr for {video_id}: {stderr_text[:1000]}")
-        if any(phrase in stderr_text for phrase in ("Private video", "This video is private", "Video unavailable", "This post is")):
+        if any(phrase in stderr_text for phrase in ("Private video", "This video is private", "Video unavailable")):
             raise EpisodeUnavailableError(f"Content {video_id} is private or unavailable")
         if "Sign in to confirm your age" in stderr_text:
             raise EpisodeAgeRestrictedError(f"Age-restricted content {video_id} — cookies required")

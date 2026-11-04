@@ -11,7 +11,7 @@
 
 ---
 
-Blurb runs as a pull-worker: it polls a remote service for jobs, downloads audio locally, transcribes it with Whisper, and posts the result back. It also handles YouTube/Patreon/RSS discovery and downloads. Only outbound connections are made; cookies stay local.
+Blurb runs as a pull-worker: it polls a remote service for jobs, downloads audio locally, transcribes it with Whisper, and posts the result back. It also handles YouTube and RSS discovery and downloads. Only outbound connections are made; cookies stay local.
 
 **Requirements:** Linux x86_64. The NVIDIA AppImage bundles Python, FFmpeg, Node.js, and cuBLAS. The ROCm image requires ROCm 7.x on the host. A source checkout needs Python 3.12, FFmpeg, and Node.js.
 
@@ -108,13 +108,12 @@ Settings live in `.env`. The AppImage uses `~/.config/blurb/.env`; a source chec
 | `POLL_INTERVAL` | `5` | Initial poll interval; backs off to 12 hours |
 | `HEARTBEAT_INTERVAL` | `60` | Seconds between liveness pings |
 | `YOUTUBE_COOKIES_FILE` | _(empty)_ | Netscape cookies.txt for age-restricted YouTube |
-| `PATREON_COOKIES_FILE` | _(empty)_ | Netscape cookies.txt for Patreon |
 | `RSS_MAX_FEED_BYTES` | `26214400` | Max decompressed RSS/Atom feed size |
 | `RSS_MAX_AUDIO_MB` | `1024` | Max RSS enclosure download size |
 | `RSS_MAX_ICON_MB` | `5` | Max RSS artwork size |
 | `ALLOW_PRIVATE_RSS_URLS` | `false` | Allow localhost/private-LAN feed URLs |
 
-Cookies are only read during discover/download jobs and are sent only to YouTube/Patreon by yt-dlp.
+Cookies are only read during discover/download jobs and are sent only to YouTube by yt-dlp.
 
 ## Building AppImages
 
@@ -162,10 +161,10 @@ Blurb makes only outbound connections. Audio never crosses the network: it is do
 
 `web_worker.py` polls `GET /worker/jobs/next`:
 
-- **`discover`** — scrape a YouTube, Patreon, or RSS source and return entries.
+- **`discover`** — scrape a YouTube or RSS source and return entries.
 - **`process`** — download audio and return a transcript.
 
-YouTube/Patreon use yt-dlp with local cookies. RSS needs no cookies; auth can be embedded in the feed URL. Results go to `POST /worker/jobs/{id}/complete`, failures to `/fail` with an `error_type`. Heartbeats and progress are posted to `/worker/heartbeat` and `/worker/jobs/{id}/progress`.
+YouTube uses yt-dlp with local cookies. RSS needs no cookies; auth can be embedded in the feed URL. Results go to `POST /worker/jobs/{id}/complete`, failures to `/fail` with an `error_type`. Heartbeats and progress are posted to `/worker/heartbeat` and `/worker/jobs/{id}/progress`.
 
 Faster-Whisper handles the decoding loop; CTranslate2 executes the model on CPU or GPU. PyTorch is not used at runtime.
 

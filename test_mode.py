@@ -2,7 +2,7 @@
 
 Lets conductor exercise the pipeline (including things like orphan detection,
 which needs entries to disappear between polls) without touching real YouTube
-or Patreon data:
+or RSS data:
 
   - A discover job with url == "pal-test" or "pal-test-<scenario>" returns a
     premade entry list instead of scraping. Point a test source's url at
@@ -16,8 +16,7 @@ or Patreon data:
     error handling can be tested deterministically.
 
 Neither "pal-test" nor "test-*" can collide with real data: real source URLs
-always contain a site domain, real YouTube ids are exactly 11 characters, and
-real Patreon ids are purely numeric.
+always contain a site domain, and real YouTube ids are exactly 11 characters.
 
 All fixture data lives in testdata/fixtures/ as plain JSON — hand-editable,
 nothing generated at request time. testdata/generate.py (re)creates the

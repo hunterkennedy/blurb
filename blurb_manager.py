@@ -1416,7 +1416,7 @@ class BlurbManager(QMainWindow):
         adv_card, adv_layout = self._card("Advanced")
         adv_help = QLabel(
             "Cookies stay on this machine. They are only read while discovering "
-            "or downloading from YouTube/Patreon."
+            "or downloading from YouTube."
         )
         adv_help.setObjectName("Muted")
         adv_help.setWordWrap(True)
@@ -1424,9 +1424,6 @@ class BlurbManager(QMainWindow):
 
         self.yt_cookie_edit, self.yt_cookie_status = self._cookie_row(
             adv_layout, "YouTube cookies"
-        )
-        self.patreon_cookie_edit, self.patreon_cookie_status = self._cookie_row(
-            adv_layout, "Patreon cookies"
         )
 
         adv_layout.addWidget(self._field_label("Transcription"))
@@ -1512,7 +1509,6 @@ class BlurbManager(QMainWindow):
             self.url_edit,
             self.key_edit,
             self.yt_cookie_edit,
-            self.patreon_cookie_edit,
         ):
             line_edit.textChanged.connect(self._on_setting_changed)
         for combo in (self.model_combo, self.device_combo, self.compute_combo):
@@ -1577,7 +1573,6 @@ class BlurbManager(QMainWindow):
         self.url_edit.setText(_read_env_var("WEB_URL"))
         self.key_edit.setText(_read_env_var("BLURB_API_KEY"))
         self.yt_cookie_edit.setText(_read_env_var("YOUTUBE_COOKIES_FILE"))
-        self.patreon_cookie_edit.setText(_read_env_var("PATREON_COOKIES_FILE"))
 
         model = _read_env_var("WHISPER_MODEL") or "distil-large-v3"
         self.model_combo.setCurrentText(model)
@@ -1627,7 +1622,6 @@ class BlurbManager(QMainWindow):
             "WEB_URL": self.url_edit.text().strip().rstrip("/"),
             "BLURB_API_KEY": self.key_edit.text().strip(),
             "YOUTUBE_COOKIES_FILE": expanded_path(self.yt_cookie_edit.text()),
-            "PATREON_COOKIES_FILE": expanded_path(self.patreon_cookie_edit.text()),
             "WHISPER_MODEL": self.model_combo.currentText().strip(),
             "WHISPER_DEVICE": device,
             "WHISPER_COMPUTE_TYPE": compute,
@@ -2114,7 +2108,7 @@ class BlurbManager(QMainWindow):
                 "ok": True,
             },
             {
-                "job_id": "demo-2", "kind": "process", "site": "patreon.com",
+                "job_id": "demo-2", "kind": "process", "site": "youtube.com",
                 "label": "post-1234", "finished_at": self._demo_started_at - 900,
                 "ok": True,
             },
@@ -2520,19 +2514,13 @@ class BlurbManager(QMainWindow):
 
     def _refresh_cookie_labels(self) -> None:
         yt = _cookie_status("YOUTUBE_COOKIES_FILE")
-        patreon = _cookie_status("PATREON_COOKIES_FILE")
 
         yt_text, yt_color = _cookie_words(yt)
         self.yt_cookie_status.setText(yt_text)
         self.yt_cookie_status.setStyleSheet(f"color: {yt_color};")
 
-        patreon_text, patreon_color = _cookie_words(patreon)
-        self.patreon_cookie_status.setText(patreon_text)
-        self.patreon_cookie_status.setStyleSheet(f"color: {patreon_color};")
-
         issues = [issue for issue in (
             _cookie_issue("YouTube", yt),
-            _cookie_issue("Patreon", patreon),
         ) if issue]
         if issues:
             self.warning_lbl.setText(" ".join(issues))
